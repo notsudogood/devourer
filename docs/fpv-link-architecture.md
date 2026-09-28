@@ -402,7 +402,11 @@ at 0.24 mean retries), but this has not been measured inside mabur's timing.
    deficit on real flights and bucket it: covered, short by ≤ one aggregate,
    short by two, more. **Kill criterion:** if shortfalls are mostly long
    outages rather than one-to-two-aggregate bursts, the ladder and IDR already
-   do the useful work; stop.
+   do the useful work; stop. **Built, not yet flown:** mabur branch
+   `claude/wifi-fpv-link-architecture-1bms9l` (on gilankpam/mabur `c8f9863`)
+   adds `SwDecoder::deficit()`, a per-burst `arq.log` and a
+   `flightreport.py` ARQ SHADOW section; its `docs/feedback-repair-rollout.md`
+   tracks the phases from there.
 2. **devourer turnaround bench with a loaded queue.** **Kill criterion (for a
    120 fps target):** status-to-repair p99 well above ~8 ms.
 3. **W and a per-period status frame,** with FEC unchanged. A/B uplink
