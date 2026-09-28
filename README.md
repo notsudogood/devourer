@@ -306,6 +306,9 @@ per-chip quirks notes at the bottom.
   goodput), and the hardware ACK/BlockAck responder for reliable-unicast links.
 - [wfb-ng tuning](docs/wfb-ng-tuning.md) — the most efficient wfb-ng
   configuration, and the SDR-measured devourer-vs-wfb-ng TX comparison.
+- [FPV feedback-repair link](docs/fpv-link-architecture.md) — architecture
+  proposal: per-frame software ACK and coded repair on a half-duplex FPV link,
+  why not hardware ACK, and the measurements that gate each rollout step.
 
 **Spectrum agility:**
 
