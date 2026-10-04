@@ -21,6 +21,10 @@ struct TxCaps {
   bool ldpc_ok = false;    /* LDPC coding supported */
   bool sgi_ok = false;     /* short guard interval */
   uint8_t bw_max_mhz = 20; /* widest TX bandwidth (20/40/80) */
+  /* Honours the per-packet hardware queue (TxMode::hw_queue, radiotap
+   * TX_FLAGS queue field). Jaguar3 only; elsewhere the field is ignored and
+   * every frame keeps the generation's own queue. */
+  bool hw_queue_ok = false;
 };
 
 /* Build caps from the chain count. The load-bearing rule: STBC needs ≥2 TX

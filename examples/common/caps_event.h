@@ -44,6 +44,7 @@ inline void emit_adapter_caps(EventSink &sink, IRadio *dev) {
       .f("ldpc", c.tx.ldpc_ok ? 1 : 0)
       .f("sgi", c.tx.sgi_ok ? 1 : 0)
       .f("bw_max", c.tx.bw_max_mhz)
+      .f("hw_queue", c.tx.hw_queue_ok ? 1 : 0)
       .arr("bw", bw, static_cast<size_t>(nbw))
       .f("txpwr_max", c.txpwr.index_max)
       .f("txpwr_step_qdb", c.txpwr.step_qdb)

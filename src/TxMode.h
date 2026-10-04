@@ -19,6 +19,20 @@
 
 namespace devourer {
 
+/* Hardware TX queue for one frame (TxMode::hw_queue). The values are the wire
+ * codes carried in the devourer-private radiotap TX_FLAGS queue field
+ * (RadiotapTxFlags.h), so keep them stable. Default leaves the generation's
+ * own choice. */
+enum class HwQueue : uint8_t {
+  Default = 0,
+  BK = 1,   /* access category background */
+  BE = 2,   /* best effort */
+  VI = 3,   /* video */
+  VO = 4,   /* voice: the highest-priority access category */
+  Mgmt = 5, /* the management queue */
+  High = 6, /* the high queue (Realtek HIQ) */
+};
+
 struct TxMode {
   enum class Mode { Legacy, HT, VHT, HE };
   Mode mode = Mode::Legacy;
@@ -61,6 +75,17 @@ struct TxMode {
    * own PPDU at its own rate/bw (radiotap TX_FLAGS kRadiotapTxFlagNoAgg, see
    * RadiotapTxFlags.h). Jaguar3 only. false keeps the radiotap byte-identical. */
   bool no_agg = false;
+
+  /* Put this frame in a different hardware queue from the default. The MAC
+   * serves its queues by priority, not in submission order, so a frame in a
+   * higher-priority queue airs ahead of frames already waiting inside the chip
+   * for the default one: the lever a latency-critical control or repair frame
+   * needs behind a video backlog. It cannot overtake frames still in the USB
+   * pipe ahead of it (every queue shares the one bulk-OUT endpoint), and frames
+   * in different queues may air out of submission order. Rides the radiotap
+   * TX_FLAGS field (RadiotapTxFlags.h). Jaguar3 only (TxCaps::hw_queue_ok);
+   * Default keeps the radiotap byte-identical. */
+  HwQueue hw_queue = HwQueue::Default;
 };
 
 /* The descriptor inputs send_packet writes, derived from a TxMode. `fixed_rate`

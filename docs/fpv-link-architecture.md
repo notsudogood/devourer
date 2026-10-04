@@ -372,9 +372,10 @@ at 0.24 mean retries), but this has not been measured inside mabur's timing.
 **devourer:**
 
 - **Per-packet TX queue selection,** so repairs and control frames jump the
-  chip's video backlog. Today `DEVOURER_TX_QSEL` is a global experimental
-  override (default 0x12, the MGMT queue). Whether a different queue actually
-  overtakes queued MGMT frames on the 8822E is unmeasured.
+  chip's video backlog: built as `TxMode::hw_queue` (Jaguar3,
+  `docs/aggregation.md`). Whether a different queue actually overtakes the
+  video queue on the 8822E is unmeasured — the turnaround bench below measures
+  it, lane by lane.
 - **A turnaround bench:** status on air → repair on air, timed at a passive
   witness from `tsfl`, with the drone's queue loaded. The TD v2 tag and
   `tests/txegress_analyze.py` fitting already exist.

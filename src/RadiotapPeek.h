@@ -76,4 +76,23 @@ inline int radiotap_peek_dbm_tx_power(const uint8_t *packet, size_t length) {
   return INT_MIN;
 }
 
+/* Peek the radiotap TX_FLAGS field (0 when absent). Lets a batch packer group
+ * frames by the devourer-private hardware-queue code (RadiotapTxFlags.h), so
+ * one bulk-OUT transfer never mixes queues. */
+inline uint16_t radiotap_peek_tx_flags(const uint8_t *packet, size_t length) {
+  const uint16_t rlen = radiotap_hdr_len(packet, length);
+  if (rlen == 0)
+    return 0;
+  auto *hdr = reinterpret_cast<struct ieee80211_radiotap_header *>(
+      const_cast<uint8_t *>(packet));
+  struct ieee80211_radiotap_iterator it;
+  if (ieee80211_radiotap_iterator_init(&it, hdr, rlen, nullptr) != 0)
+    return 0;
+  while (ieee80211_radiotap_iterator_next(&it) == 0) {
+    if (it.this_arg_index == IEEE80211_RADIOTAP_TX_FLAGS)
+      return static_cast<uint16_t>(it.this_arg[0] | (it.this_arg[1] << 8));
+  }
+  return 0;
+}
+
 } /* namespace devourer */

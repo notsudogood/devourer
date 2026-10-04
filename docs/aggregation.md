@@ -111,6 +111,19 @@ applied AFTER the mode in the descriptor: `DEVOURER_TX_QSEL=<0..7|0x12>` (raw
 QSEL) and `DEVOURER_TX_AMPDU="max[/density[/rty]]"` (raw AGG fields). The RX
 side surfaces `paggr` (rx-desc "inside an aggregate") and `ppdu_cnt` in
 `rx_pkt_attrib` + the rxdemo `rx.frame`/`rx.txhit` events.
+Per frame, `TxMode::hw_queue` (Jaguar3 only, `TxCaps::hw_queue_ok`) moves one
+frame to another hardware queue — BK/BE/VI/VO, Mgmt or High — through a
+devourer-private radiotap TX_FLAGS field, overriding the session's queue and
+`DEVOURER_TX_QSEL` alike. The point is latency, not aggregation: the MAC serves
+its queues by priority, so a control or repair frame in a higher-priority queue
+can air ahead of video already waiting in the chip. It cannot pass frames still
+in the USB pipe ahead of it (every queue shares the one bulk-OUT endpoint), and
+`send_packets` never packs two queues into one transfer. A frame moved to Mgmt
+or High always airs alone (AGG_EN cleared, see the MGMT wedge below). Which
+queue actually overtakes which on air is **unmeasured** — that is what the
+mabur turnaround bench (`docs/fpv-link-architecture.md` §10, rollout phase 2)
+is for.
+
 `tests/ampdu_spike.sh` sweeps the aggregation-condition matrix,
 `tests/ampdu_pacing_sweep.sh` the pacing registers, `tests/ampdu_onair_ab.sh`
 the SDR A/B.

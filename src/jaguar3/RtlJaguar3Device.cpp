@@ -2017,7 +2017,9 @@ int RtlJaguar3Device::SetTxPacketPowerOffsetQdb(int qdb) {
 }
 
 devourer::TxCaps RtlJaguar3Device::GetTxCaps() {
-  return devourer::tx_caps_for_chains(2); /* 8822C/8822E are 2T2R */
+  devourer::TxCaps c = devourer::tx_caps_for_chains(2); /* 8822C/8822E are 2T2R */
+  c.hw_queue_ok = true; /* build_tx_block maps TxMode::hw_queue to QSEL */
+  return c;
 }
 
 int RtlJaguar3Device::SetXtalCap(int cap) {
@@ -2271,10 +2273,14 @@ size_t RtlJaguar3Device::send_packets(const TxPacketView *pkts, size_t count) {
      * build_tx_block when that frame leads the next URB. Same rule for a
      * differing radiotap DBM_TX_POWER: a first-seen power value can reprogram
      * an offset bank (0x1e70), which must land between URBs — an already-
-     * packed frame would otherwise air at the new bank value. */
+     * packed frame would otherwise air at the new bank value. And for a
+     * differing hardware-queue code (TxMode::hw_queue): halmac packs only
+     * same-queue frames per transfer, so a mixed-QSEL URB is unvalidated
+     * territory for the TXDMA; one queue per URB keeps it rtw88-shaped. */
     std::vector<size_t> lens;
     int run_chan = 0; /* 0 = no per-packet CHANNEL seen yet (current channel) */
     int run_pwr = INT_MIN; /* INT_MIN = session-default power */
+    uint8_t run_queue = 0; /* hardware-queue code of the run's first frame */
     for (size_t i = done; i < count && lens.size() < lim.max_frames; ++i) {
       const uint16_t rlen =
           devourer::radiotap_hdr_len(pkts[i].data, pkts[i].len);
@@ -2287,12 +2293,15 @@ size_t RtlJaguar3Device::send_packets(const TxPacketView *pkts, size_t count) {
           devourer::radiotap_peek_channel(pkts[i].data, pkts[i].len);
       const int want_pwr =
           devourer::radiotap_peek_dbm_tx_power(pkts[i].data, pkts[i].len);
+      const uint8_t want_queue = devourer::radiotap_tx_queue_code(
+          devourer::radiotap_peek_tx_flags(pkts[i].data, pkts[i].len));
       if (lens.empty()) {
         run_chan = want;
         run_pwr = want_pwr;
+        run_queue = want_queue;
       } else if ((want > 0 &&
                   want != (run_chan > 0 ? run_chan : _channel.Channel)) ||
-                 want_pwr != run_pwr) {
+                 want_pwr != run_pwr || want_queue != run_queue) {
         break;
       }
       lens.push_back(pkts[i].len - rlen);
@@ -2387,6 +2396,9 @@ size_t RtlJaguar3Device::build_tx_block(const uint8_t *packet, size_t length,
   int radiotap_pkt_pwr_db = INT_MIN;
   /* Radiotap TX_FLAGS devourer-private no-aggregation bit (TxMode::no_agg). */
   bool no_agg = false;
+  /* Radiotap TX_FLAGS devourer-private hardware-queue code (TxMode::hw_queue);
+   * 0 = keep the QSEL chosen below. */
+  uint8_t queue_code = 0;
 
   auto *rtap_hdr = reinterpret_cast<struct ieee80211_radiotap_header *>(
       const_cast<uint8_t *>(packet));
@@ -2409,9 +2421,12 @@ size_t RtlJaguar3Device::build_tx_block(const uint8_t *packet, size_t length,
       radiotap_channel =
           devourer::freq_to_chan(get_unaligned_le16(it.this_arg));
       break;
-    case IEEE80211_RADIOTAP_TX_FLAGS:
-      no_agg = devourer::radiotap_tx_no_agg(get_unaligned_le16(it.this_arg));
+    case IEEE80211_RADIOTAP_TX_FLAGS: {
+      const uint16_t f = get_unaligned_le16(it.this_arg);
+      no_agg = devourer::radiotap_tx_no_agg(f);
+      queue_code = devourer::radiotap_tx_queue_code(f);
       break;
+    }
     case IEEE80211_RADIOTAP_DBM_TX_POWER:
       /* Signed dB delta for THIS frame, resolved to a power-offset bank
        * below (txpkt_type_for_idx). Mirrors the Jaguar2 per-packet path. */
@@ -2615,6 +2630,20 @@ size_t RtlJaguar3Device::build_tx_block(const uint8_t *packet, size_t length,
       SET_TX_DESC_AGG_EN_8822C(out, 0);
       SET_TX_DESC_BK_8822C(out, 1);
     }
+    jaguar3::cal_txdesc_chksum_8822c(out);
+  }
+  /* Per-packet hardware queue (TxMode::hw_queue), last so it wins over the
+   * MGMT default, the A-MPDU session's TID queue and the DEVOURER_TX_QSEL
+   * spike knob alike: it is the most specific request. On a TID queue an
+   * aggregatable frame stays aggregatable, now with its new queue's
+   * neighbours. The MGMT and HIGH queues are not aggregation queues — AGG_EN
+   * on MGMT wedges it (docs/aggregation.md) — so a frame moved there airs
+   * alone whatever the session says. Checksummed span. */
+  const int qsel = jaguar3::qsel_for_queue_code_8822c(queue_code);
+  if (qsel >= 0) {
+    SET_TX_DESC_QSEL_8822C(out, static_cast<uint8_t>(qsel));
+    if (!jaguar3::qsel_aggregates_8822c(static_cast<uint8_t>(qsel)))
+      SET_TX_DESC_AGG_EN_8822C(out, 0);
     jaguar3::cal_txdesc_chksum_8822c(out);
   }
   const size_t frame_off =

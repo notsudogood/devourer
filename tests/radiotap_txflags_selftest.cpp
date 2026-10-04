@@ -7,8 +7,12 @@
 #include <vector>
 
 #include "RadiotapBuilder.h"
+#include "RadiotapPeek.h"
 #include "RadiotapTxFlags.h"
 #include "ieee80211_radiotap.h"
+#if defined(DEVOURER_HAVE_JAGUAR3)
+#include "jaguar3/FrameParserJaguar3.h"
+#endif
 
 static int failures = 0;
 
@@ -146,6 +150,63 @@ int main() {
       CHECK_EQ(rt_na.size(), devourer::build_stream_radiotap(t).size());
     }
   }
+
+  /* TxMode::hw_queue rides the TX_FLAGS queue field ([11:9]) on every
+   * builder, composes with no_agg, keeps the radiotap length (the J3
+   * HT-vs-VHT length contract), and Default stays byte-identical. The batch
+   * packer's peek reads back the same field the device parser does. */
+  {
+    const devourer::TxMode::Mode modes[4] = {
+        devourer::TxMode::Mode::Legacy, devourer::TxMode::Mode::HT,
+        devourer::TxMode::Mode::VHT, devourer::TxMode::Mode::HE};
+    const devourer::HwQueue queues[6] = {
+        devourer::HwQueue::BK, devourer::HwQueue::BE, devourer::HwQueue::VI,
+        devourer::HwQueue::VO, devourer::HwQueue::Mgmt, devourer::HwQueue::High};
+    for (const auto mode : modes) {
+      devourer::TxMode t;
+      t.mode = mode;
+      const auto rt_plain = devourer::build_stream_radiotap(t);
+      CHECK_EQ(devourer::radiotap_tx_queue_code(find_tx_flags(rt_plain)), 0);
+      for (const auto q : queues) {
+        t.hw_queue = q;
+        t.no_agg = (static_cast<int>(q) % 2) == 0;
+        const auto rt = devourer::build_stream_radiotap(t);
+        const uint16_t f = find_tx_flags(rt);
+        CHECK_EQ(devourer::radiotap_tx_queue_code(f), static_cast<int>(q));
+        CHECK_EQ(devourer::radiotap_tx_no_agg(f), t.no_agg ? 1 : 0);
+        CHECK_EQ(f & IEEE80211_RADIOTAP_F_TX_NOACK, IEEE80211_RADIOTAP_F_TX_NOACK);
+        CHECK_EQ(rt.size(), rt_plain.size());
+        std::vector<uint8_t> pkt = rt; /* the peek needs room for an MPDU */
+        pkt.resize(rt.size() + 24, 0);
+        CHECK_EQ(devourer::radiotap_peek_tx_flags(pkt.data(), pkt.size()), f);
+      }
+    }
+    /* Code 7 is reserved and reads as default; the field never leaks into
+     * the no-aggregation bit or the radiotap-defined bits. */
+    CHECK_EQ(devourer::radiotap_tx_queue_code(devourer::radiotap_tx_queue_flags(7)), 0);
+    CHECK_EQ(devourer::radiotap_tx_queue_flags(7) & (devourer::kRadiotapTxFlagNoAgg | 0x00FF), 0);
+    CHECK_EQ(devourer::radiotap_tx_queue_code(devourer::kRadiotapTxFlagNoAgg), 0);
+  }
+
+#if defined(DEVOURER_HAVE_JAGUAR3)
+  /* Jaguar3 QSEL per queue code: the vendor QSLT values (hal/hal_com.h);
+   * default and the reserved code leave the caller's QSEL alone. */
+  CHECK_EQ(jaguar3::qsel_for_queue_code_8822c(0), -1);
+  CHECK_EQ(jaguar3::qsel_for_queue_code_8822c(1), 0x02);
+  CHECK_EQ(jaguar3::qsel_for_queue_code_8822c(2), 0x00);
+  CHECK_EQ(jaguar3::qsel_for_queue_code_8822c(3), 0x05);
+  CHECK_EQ(jaguar3::qsel_for_queue_code_8822c(4), 0x07);
+  CHECK_EQ(jaguar3::qsel_for_queue_code_8822c(5), 0x12);
+  CHECK_EQ(jaguar3::qsel_for_queue_code_8822c(6), 0x11);
+  CHECK_EQ(jaguar3::qsel_for_queue_code_8822c(7), -1);
+  /* Only the TID queues aggregate: a frame moved to MGMT/HIGH must leave
+   * with AGG_EN cleared (AGG_EN on MGMT wedges the queue). */
+  for (uint8_t code = 1; code <= 4; ++code)
+    CHECK_EQ(jaguar3::qsel_aggregates_8822c(
+                 static_cast<uint8_t>(jaguar3::qsel_for_queue_code_8822c(code))), 1);
+  CHECK_EQ(jaguar3::qsel_aggregates_8822c(0x12), 0);
+  CHECK_EQ(jaguar3::qsel_aggregates_8822c(0x11), 0);
+#endif
 
   if (failures) {
     std::fprintf(stderr, "%d failure(s)\n", failures);

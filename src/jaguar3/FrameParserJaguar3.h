@@ -113,6 +113,28 @@ constexpr size_t RXDESC_SIZE_8822C = 24; /* RX_DESC_SIZE_88XX */
 
 namespace jaguar3 {
 
+/* TX-descriptor QSEL for a TxMode::hw_queue wire code (RadiotapTxFlags.h),
+ * with the vendor queue-select values (hal/hal_com.h QSLT_*). Returns -1 for
+ * code 0 (default) and anything unknown: the caller then keeps its own QSEL.
+ * All six queues have reserved TX FIFO pages (init_trx_cfg's PQ map: VO/VI on
+ * the normal priority, BE/BK on low, Mgmt/High on high, each with 64 pages
+ * plus the public pool), so none can starve for lack of a page reservation. */
+inline int qsel_for_queue_code_8822c(uint8_t code) {
+  switch (code) {
+  case 1: return 0x02; /* QSLT_BK */
+  case 2: return 0x00; /* QSLT_BE */
+  case 3: return 0x05; /* QSLT_VI */
+  case 4: return 0x07; /* QSLT_VO */
+  case 5: return 0x12; /* QSLT_MGNT */
+  case 6: return 0x11; /* QSLT_HIGH */
+  default: return -1;
+  }
+}
+
+/* Whether a QSEL is an aggregation (TID) queue. MGMT 0x12 and HIGH 0x11 are
+ * not: AGG_EN on the MGMT queue wedges it (docs/aggregation.md, 8822BU). */
+inline bool qsel_aggregates_8822c(uint8_t qsel) { return qsel <= 0x07; }
+
 /* Port of fill_txdesc_check_sum_8822c (halmac_common_8822c.c): clear the 16-bit
  * checksum field, then XOR all 16-bit little-endian words of the descriptor
  * (PKT_OFFSET + TXDESC_SIZE/8) << 1 word-pairs) and store the result. Read

@@ -31,6 +31,25 @@ inline bool radiotap_tx_no_agg(uint16_t tx_flags) {
   return (tx_flags & kRadiotapTxFlagNoAgg) != 0;
 }
 
+/* Devourer-private TX_FLAGS field, bits [11:9]: the frame's hardware TX queue
+ * as a TxMode::hw_queue wire code (TxMode.h HwQueue: 0 = the generation's
+ * default, 1..6 = BK/BE/VI/VO/Mgmt/High, 7 reserved and read as default).
+ * Sits above the no-aggregation bit, clear of the radiotap-defined bits.
+ * Honoured by Jaguar3 only (TxCaps::hw_queue_ok); others ignore it. */
+constexpr unsigned kRadiotapTxFlagQueueShift = 9;
+constexpr uint16_t kRadiotapTxFlagQueueMask = 0x0E00;
+
+inline uint16_t radiotap_tx_queue_flags(uint8_t code) {
+  return static_cast<uint16_t>((static_cast<unsigned>(code) << kRadiotapTxFlagQueueShift) &
+                               kRadiotapTxFlagQueueMask);
+}
+
+inline uint8_t radiotap_tx_queue_code(uint16_t tx_flags) {
+  const uint8_t code = static_cast<uint8_t>((tx_flags & kRadiotapTxFlagQueueMask) >>
+                                            kRadiotapTxFlagQueueShift);
+  return code == 7 ? 0 : code;
+}
+
 struct RadiotapMcsField {
   bool have_mcs = false;
   uint8_t mcs = 0;   /* HT MCS index 0..31, valid when have_mcs */

@@ -1122,6 +1122,7 @@ endif()
 add_executable(RadiotapTxFlagsSelftest tests/radiotap_txflags_selftest.cpp)
 target_compile_features(RadiotapTxFlagsSelftest PRIVATE cxx_std_20)
 target_link_libraries(RadiotapTxFlagsSelftest PRIVATE devourer)
+target_include_directories(RadiotapTxFlagsSelftest PRIVATE src)
 add_test(NAME radiotap_txflags COMMAND RadiotapTxFlagsSelftest)
 
 # Headless guard for the burst-TDMA example's pure logic (examples/tdma/tdma.h):

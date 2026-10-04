@@ -25,10 +25,11 @@ constexpr uint32_t kPresentHe       = 1u << 23;
 constexpr uint16_t kTxFlagsNoAck = 0x0008;
 
 /* TX_FLAGS: always NoAck (broadcast injection), plus the devourer-private
- * no-aggregation bit when the mode asks for it. */
+ * no-aggregation bit and hardware-queue field when the mode asks for them. */
 uint16_t tx_flags(const TxMode& cfg) {
-  return static_cast<uint16_t>(kTxFlagsNoAck |
-                               (cfg.no_agg ? kRadiotapTxFlagNoAgg : 0));
+  return static_cast<uint16_t>(
+      kTxFlagsNoAck | (cfg.no_agg ? kRadiotapTxFlagNoAgg : 0) |
+      radiotap_tx_queue_flags(static_cast<uint8_t>(cfg.hw_queue)));
 }
 
 void emit_u8(std::vector<uint8_t>& v, uint8_t x) { v.push_back(x); }
