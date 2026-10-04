@@ -403,13 +403,19 @@ at 0.24 mean retries), but this has not been measured inside mabur's timing.
    deficit on real flights and bucket it: covered, short by ≤ one aggregate,
    short by two, more. **Kill criterion:** if shortfalls are mostly long
    outages rather than one-to-two-aggregate bursts, the ladder and IDR already
-   do the useful work; stop. **Built, not yet flown:** mabur branch
+   do the useful work; stop. **Built and flown twice, indoors:** mabur branch
    `claude/wifi-fpv-link-architecture-1bms9l` (on gilankpam/mabur `c8f9863`)
    adds `SwDecoder::deficit()`, a per-burst `arq.log` and a
    `flightreport.py` ARQ SHADOW section; its `docs/feedback-repair-rollout.md`
-   tracks the phases from there.
+   tracks the phases and the results from there. In short: outside deep
+   fades every lost episode was repairable-shaped; inside a garage most were
+   outages — two short indoor flights, so the range flights decide it.
 2. **devourer turnaround bench with a loaded queue.** **Kill criterion (for a
-   120 fps target):** status-to-repair p99 well above ~8 ms.
+   120 fps target):** status-to-repair p99 well above ~8 ms. **Built, not yet
+   run on hardware:** `TxMode::hw_queue` here, and on the same mabur branch a
+   ping/pong pair (`T_TA_PING`/`T_TA_PONG`), a drone responder that answers on
+   a chosen hardware queue, `ta.log` timed by a second GS card's `tsfl`, and
+   a `flightreport.py` TURNAROUND section that applies this gate per queue.
 3. **W and a per-period status frame,** with FEC unchanged. A/B uplink
    delivery and video loss against `RcfSlotter`.
 4. **The repair loop on top of today's FEC.** Measure residual loss and
