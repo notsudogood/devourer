@@ -23,7 +23,10 @@
 namespace devourer {
 namespace chanmig {
 
-inline constexpr int kSurveySchemaV = 1;
+/* v2 added clm / nhm_env; v3 added busy_source. Readers accept any version up
+ * to this one: every added field is optional, so an older record still parses
+ * with them absent. */
+inline constexpr int kSurveySchemaV = 3;
 
 enum SurveyFlag : uint16_t {
   kFlagTruncated = 1u << 0,      /* dwell cut short (shutdown) */
@@ -47,9 +50,13 @@ struct SurveyDwell {
   int settle_ms = 0;
   int64_t observe_ms = 0; /* the valid observation window the deltas span */
 
-  /* Frame-free energy (deltas over observe; validity per source). */
+  /* Frame-free energy (deltas over observe; validity per source).
+   * valid_cck is independent of valid_fa — see RxEnergy::valid_cck in
+   * RxSense.h — a scout-sourced dwell can have a real OFDM delta with no
+   * CCK reset behind it. */
   bool valid_fa = false;
   uint32_t fa_ofdm = 0, fa_cck = 0, cca_ofdm = 0, cca_cck = 0;
+  bool valid_cck = false;
   bool valid_igi = false;
   uint8_t igi = 0;
   bool valid_nhm = false;
@@ -57,6 +64,30 @@ struct SurveyDwell {
   uint16_t nhm_dur = 0;
   uint8_t nhm_busy_pct = 0; /* % of NHM samples above the lowest bucket */
   uint8_t nhm_peak = 0;     /* fullest bucket index */
+  /* The same histogram with the receiver's own noise floor removed (the
+   * vendor's nhm_env_ratio). nhm_busy_pct rails near 100 on a quiet channel
+   * because the ambient floor already clears the lowest bucket; this one does
+   * not, which is what makes it comparable between bins. */
+  uint8_t nhm_env_pct = 0;
+
+  /* CLM busy airtime over the observe window: the fraction of 4 us ticks in
+   * which the baseband held the channel. Unlike everything above it is a
+   * time fraction rather than an event count, so it needs no per-adapter
+   * normalisation to compare bins.
+   *
+   * Its value here is the CONTRAST with nhm_env_pct, not either alone. A bin
+   * busy with 802.11 raises both; a bin carrying a non-802.11 emitter raises
+   * nhm_env_pct while clm_ratio_pct stays low, because the BB never recognises
+   * a preamble to defer to. That second case is the one a frame-counting
+   * survey — and a monitor-mode sniffer — calls empty. */
+  bool valid_clm = false;
+  uint8_t clm_ratio_pct = 0;
+  /* Which facility produced clm_ratio_pct (devourer::BusySource): 1 = Realtek
+   * CCX CLM, 2 = a MAC channel-timer pair. Not decoration — the two define
+   * "busy" differently (a channel-timer family counts the radio's own TX),
+   * so ranking across a MIXED pair of scouts compares two rulers. 0 on a
+   * record with no reading, and on a v1/v2 record that predates the field. */
+  uint8_t busy_source = 0;
 
   /* Frame-driven aggregate over the observe window (raw devourer units). */
   uint32_t frames = 0;

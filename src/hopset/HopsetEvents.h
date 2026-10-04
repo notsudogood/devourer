@@ -97,15 +97,32 @@ inline void emit_sense(EventSink &sink, const TxSenseSample &s,
       .f("window_us", (unsigned long long)s.window_us)
       .f("settle_us", (unsigned long long)settle_us)
       .f("read_us", (unsigned long long)read_us);
+  /* cca_ofdm/fa_ofdm gate on valid_fa; cca_cck/fa_cck gate SEPARATELY on
+   * valid_cck (RxSense.h), exactly as src/chanmig/SurveyJsonl.h does. A
+   * scout-sourced dwell has a real OFDM delta with NO CCK reset behind it, so
+   * emitting its cca_cck/fa_cck as plain zeros would be indistinguishable
+   * from a genuinely quiet CCK band — and folding them into the rates below
+   * would understate occupancy by however much CCK energy went uncounted.
+   * The rates therefore sum only the halves that are real, and gate on
+   * valid_fa alone — the same admission test score_sample and chanmig's
+   * EvidenceStore apply. Emitting a rate the scorer would have ignored is
+   * how a log reader ends up investigating why the two disagree. */
   ev.f("valid_fa", s.valid_fa);
   if (s.valid_fa) {
     ev.f("cca_ofdm", (unsigned long long)s.cca_ofdm)
-        .f("cca_cck", (unsigned long long)s.cca_cck)
-        .f("fa_ofdm", (unsigned long long)s.fa_ofdm)
+        .f("fa_ofdm", (unsigned long long)s.fa_ofdm);
+  }
+  ev.f("valid_cck", s.valid_cck);
+  if (s.valid_cck) {
+    ev.f("cca_cck", (unsigned long long)s.cca_cck)
         .f("fa_cck", (unsigned long long)s.fa_cck);
+  }
+  if (s.valid_fa) {
     const double ms = s.window_us ? s.window_us / 1000.0 : 1.0;
-    ev.f("cca_rate", (s.cca_ofdm + s.cca_cck) / ms)
-        .f("fa_rate", (s.fa_ofdm + s.fa_cck) / ms);
+    const unsigned long long cca =
+        s.cca_ofdm + (s.valid_cck ? s.cca_cck : 0u);
+    const unsigned long long fa = s.fa_ofdm + (s.valid_cck ? s.fa_cck : 0u);
+    ev.f("cca_rate", cca / ms).f("fa_rate", fa / ms);
   }
   ev.f("valid_igi", s.valid_igi);
   if (s.valid_igi)
@@ -113,7 +130,12 @@ inline void emit_sense(EventSink &sink, const TxSenseSample &s,
   ev.f("valid_nhm", s.valid_nhm);
   if (s.valid_nhm)
     ev.f("nhm_busy", (unsigned long long)s.nhm_busy_pct)
+        .f("nhm_env", (unsigned long long)s.nhm_env_pct)
         .f("nhm_dur", (unsigned long long)s.nhm_duration);
+  /* Emitted, not scored — see TxSenseSample::valid_clm. */
+  ev.f("valid_clm", s.valid_clm);
+  if (s.valid_clm)
+    ev.f("clm", (unsigned long long)s.clm_ratio_pct);
   if (s.injected)
     ev.f("inject", 1);
   ev.hexf("flags", s.flags, 0).f("scored", scored);

@@ -87,7 +87,7 @@ public:
    * OTP is not reliably readable later), decoded on demand on 8822C. */
   bool GetPermanentMacAddress(uint8_t out[6]) override;
   uint64_t ReadTsf() override;
-  void WriteTsf(uint64_t tsf) override;
+  bool WriteTsf(uint64_t tsf) override;
   bool StartBeacon(const uint8_t *beacon, size_t len, int interval_tu) override;
   /* In-place beacon content swap (IRadio contract): a fresh
    * download_beacon_page; interval/TBTT/port identity untouched. */
@@ -181,13 +181,51 @@ public:
    * the same facilities in a newer register space — OFDM/CCK CCA (0x2c08), CCK
    * FA (0x1a5c), OFDM FA (sum of 0x2d04/08/10/20/0c), IGI (0x1d70) — reset via
    * 0x1a2c + 0x1eb4[25]. Read-then-reset for a per-call delta; serialized on
-   * _reg_mu against the coex runtime thread. The read side of the CW tone. */
+   * _reg_mu against the coex runtime thread. The read side of the CW tone.
+   * With DEVOURER_RX_NOISE_FLOOR (and with_nhm) it adds the absolute idle
+   * floor from a second, absolute-threshold NHM window (the vendor ACS
+   * recipe; NoiseFloorMath.h) — this generation has no idle-noise report. */
   RxEnergy GetRxEnergy(bool with_nhm) override;
+
+  /* Frame-free scout read (see IRtlRadio::GetRxEnergyScout) — 8 reads then
+   * a 4-write composed reset, 12 EP0 transfers in TWO batched groups (the
+   * writes are composed from two of the reads, so they cannot share a
+   * group; at kAsyncWriteDepth = 8 that is two completion waits). The two
+   * reset dwords (0x1d2c/0x1eb4) are read fresh inside the same batch every
+   * call; a host-side shadow buys nothing measurable once batched
+   * (tests/scout_read_bench.cpp) and would need invalidation on paths the
+   * host cannot see (firmware channel switch). Fills only
+   * valid_fa/fa_ofdm/cca_ofdm; see ScoutEnergyMath.h and the .cpp doc
+   * comment. */
+  RxEnergy GetRxEnergyScout() override;
+
+  /* Busy-airtime NHM window and RF18 channel readback — contracts on
+   * IRtlRadio, caveats (counter-reset collisions, frozen estimate, recipe
+   * cache invalidation) in jaguar3/CLAUDE.md "Busy-airtime NHM". */
+  bool ArmNhmBusy(uint16_t period_4us) override;
+  NhmBusy ReadNhmBusy() override;
+  int ReadTunedCentral() override;
+
+  /* Bench/debug-only raw BB register peek (tests/scout_read_bench.cpp's
+   * on-hardware verification that GetRxEnergyScout's composed reset
+   * actually lands on the chip, not just that ScoutEnergyMath.h's pure
+   * arithmetic is right — a stuck 0x1eb4[25] would otherwise pass every
+   * host test and still hold the OFDM counters in permanent reset).
+   * Serializes on _reg_mu like every other register access here. Not on
+   * IRtlRadio — chip-specific by design, for a caller that already knows
+   * it holds a Jaguar3 (the bench downcasts). */
+  uint32_t DebugPeekBb(uint16_t addr) {
+    std::lock_guard<std::mutex> lk(_reg_mu);
+    return _device.rtw_read<uint32_t>(addr);
+  }
+  /* This adapter's register-transfer count (RtlAdapter::ctrl_xfers) — for
+   * tests/scout_read_bench.cpp's per-call bracketing. */
+  uint64_t DebugCtrlXfers() const { return _device.ctrl_xfers(); }
 
   /* Consolidated windowed RX link-quality snapshot (see RxQuality.h) — subsumes
    * GetRxEnergy. Fed per decoded frame in the RX loop via _rxq. On Jaguar3 the
-   * noise-floor is the passive rssi-snr estimate (this generation has no
-   * background DIG, so IGI is static and can't track the floor). */
+   * always-on noise floor is the passive rssi-snr estimate; the absolute
+   * (frame-free) one rides GetRxEnergy's NHM idle window when opted in. */
   devourer::RxQuality GetRxQuality() override {
     return devourer::build_rx_quality(_rxq.snapshot(), GetRxEnergy(true));
   }
@@ -225,6 +263,44 @@ public:
   bool should_stop = false;
 
 private:
+  /* Maps ChannelWidth_t to the devourer RX bw code (0/1/2 = 20/40/80 MHz),
+   * for _rx_bw_code below. Explicit switch rather than a cast: the enum's
+   * numeric values happen to line up today (CHANNEL_WIDTH_20/40/80 = 0/1/2)
+   * but that is not a contract this code should rely on, and the narrowband
+   * 5/10 MHz widths have no RX-bw-code equivalent (fold to 20). */
+  static uint8_t channel_width_to_bw_code(ChannelWidth_t w) {
+    switch (w) {
+    case CHANNEL_WIDTH_40:
+      return 1;
+    case CHANNEL_WIDTH_80:
+      return 2;
+    default:
+      return 0;
+    }
+  }
+
+  /* This generation's CCX map and register access, under its locks — see
+   * IRtlRadio::with_ccx. Private: the base class calls it, nobody else. */
+  bool with_ccx(const CcxFn &fn) override {
+    /* Nothing to lend before bring-up: the BB is not programmed, and a
+     * window armed against it would be forgotten by Init/InitWrite's reset. */
+    if (!_brought_up)
+      return false;
+    std::lock_guard<std::mutex> reg(_reg_mu);
+    std::lock_guard<std::mutex> ccx(busy_window_mutex());
+    /* A CLM arm rewrites the CCX dwords the busy-NHM recipe cache holds
+     * (period low half, ctrl bit0): recompose it on the next ArmNhmBusy. */
+    _nhm_busy_ready = false;
+    const Read32 rd = [this](uint16_t a) {
+      return _device.rtw_read<uint32_t>(a);
+    };
+    const SetBb wr = [this](uint16_t a, uint32_t m, uint32_t v) {
+      _device.phy_set_bb_reg(a, m, v);
+    };
+    fn(devourer::nhm_regs_jgr3(), rd, wr);
+    return true;
+  }
+
   /* Parse one send_packet-contract buffer (radiotap + 802.11) and build its
    * TXDMA block — 48-byte descriptor, pkt_offset×8 pad, frame — at `out`
    * (zeroed, sized desc + pad + frame by the caller). Performs the per-packet
@@ -247,6 +323,14 @@ private:
    * thread every ~2 s like the vendor watchdog. */
   jaguar3::PhydmRuntimeJaguar3 _phydm;
   SelectedChannel _channel{};
+  /* Mirrors _channel.ChannelWidth as a devourer bw code (0/1/2 = 20/40/80 MHz)
+   * so the RX completion handler can read the currently-tuned width without
+   * taking _reg_mu — same relaxed-atomic-mirror pattern as _txpkt_img below.
+   * parse_phy_sts_jgr3 needs it on every frame to resolve rxsc 0 ("full
+   * configured bandwidth", phydm_rxsc_2_bw) to an actual width. Written
+   * wherever _channel.ChannelWidth is set (Init, InitWrite, SetMonitorChannel,
+   * FastSetBandwidth); FastRetune never changes width. */
+  std::atomic<uint8_t> _rx_bw_code{0};
   Action_ParsedRadioPacket _packetProcessor = nullptr;
   /* Runtime TX-power knobs (atomic so GetTxPowerState's cached snapshot is
    * readable cross-thread). Flat override -1 = the chip's efuse-calibrated
@@ -290,6 +374,11 @@ private:
   std::atomic<bool> _txpwr_sat_high{false};
   /* Bring-up completion: gates the live apply (+ _reg_mu use) in the setters. */
   bool _brought_up = false;
+  /* Busy-NHM recipe cache (ArmNhmBusy): the composed 0x1e40/0x1e60 dwords
+   * once the recipe is programmed. Cleared by anything else that programs
+   * NHM (GetRxEnergy with_nhm) and by a full channel set / InitWrite. */
+  bool _nhm_busy_ready = false;
+  uint32_t _nhm_busy_1e40 = 0, _nhm_busy_1e60 = 0;
   /* Rolling per-frame RX link-quality aggregate (GetRxQuality). */
   devourer::RxQualityAccumulator _rxq;
   devourer::RxPathActivityAccumulator _rxpaths;
@@ -382,7 +471,7 @@ private:
    * active (_rx_loop_active) the coex thread skips its C2H drain — the RX async
    * loop sees the C2H reports as part of its stream. */
   std::thread _coex_thread;
-  volatile bool _coex_stop = false;
+  std::atomic<bool> _coex_stop{false}; /* written by Stop/~/re-init, read by the coex loop */
   void coex_runtime_loop();
   /* Nominal beacon interval in TU while a beacon is active (0 = none); the
    * AdjustBeaconTiming one-shot tweak restores to this. */

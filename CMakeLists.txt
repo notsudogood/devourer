@@ -230,6 +230,10 @@ add_library(devourer
     src/chanmig/MigClock.h
     src/chanmig/MigProposer.h
     src/chanmig/MigResponder.h
+    src/sensing/SenseWindow.h
+    src/sensing/SenseWindow.cpp
+    src/sensing/SurveyFrameAgg.h
+    src/sensing/DwellExecutor.h
     src/hopset/HopsetState.h
     src/hopset/HopsetTypes.h
     src/hopset/HopsetWire.h
@@ -243,6 +247,7 @@ add_library(devourer
     src/IRtlRadio.h
     src/SignalStop.cpp
     src/SignalStop.h
+    src/DeviceProbe.cpp
     src/WiFiDriver.cpp
     src/WiFiDriver.h
     src/registry_priv.h
@@ -388,6 +393,7 @@ if(DEVOURER_MT7612U)
         src/mt7612u/Mt7612uRadio.cpp src/mt7612u/Mt7612uRadio.h
         src/mt7612u/Mt7612uMapping.h
         src/mt7612u/Mt7612uRxQueue.h
+        src/mt7612u/Mt7612uTsfRead.h
         src/mt7612u/internal.h
         src/mt7612u/regs.h
         src/mt7612u/initvals.h
@@ -666,6 +672,17 @@ endif()
 add_executable(reglat tests/reglat.cpp)
 target_link_libraries(reglat PUBLIC devourer PRIVATE PkgConfig::libusb)
 
+# scout_read_bench — USB transfer-count + latency bench for
+# IRtlRadio::GetRxEnergyScout() vs the full GetRxEnergy(false) (Jaguar3
+# channel-scout read). Needs a live Jaguar3 card and an
+# InitWrite bring-up, so it uses DeviceSession/WiFiDriver like the doctor
+# demo, not reglat's bare RtlAdapter path — see its header.
+if(DEVOURER_JAGUAR3)
+    add_executable(scout_read_bench tests/scout_read_bench.cpp)
+    target_include_directories(scout_read_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
+    target_link_libraries(scout_read_bench PUBLIC devourer PRIVATE PkgConfig::libusb)
+endif()
+
 add_executable(rxdemo
     examples/rx/main.cpp
     examples/common/env_config.cpp
@@ -838,6 +855,16 @@ add_executable(CcaGatesProbe
 target_include_directories(CcaGatesProbe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
 target_link_libraries(CcaGatesProbe PUBLIC devourer PRIVATE PkgConfig::libusb)
 
+# On-air driver for IRadio::ArmChannelBusy, through the public contract only
+# (arm + GetChannelBusy). tests/busy_window_probe.sh runs its arms and asserts
+# the separations; a spoiled window must come back INVALID with its reason,
+# never as a plausible number.
+add_executable(BusyWindowProbe
+    tests/busy_window_probe.cpp
+)
+target_include_directories(BusyWindowProbe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
+target_link_libraries(BusyWindowProbe PUBLIC devourer PRIVATE PkgConfig::libusb)
+
 # Headless regression guard for the binary-stdin framing shared by the two
 # stream demos above (examples/common/stream_stdin.h). No libusb, no radio — just the
 # set_stdin_binary() + read_exact() path, so a text-mode regression (e.g. the
@@ -923,6 +950,33 @@ target_link_libraries(Mt7612uRxQueueSelftest PRIVATE devourer Threads::Threads)
 
 add_test(NAME mt7612u_rx_queue COMMAND Mt7612uRxQueueSelftest)
 
+# Headless guard for the MT7612U coherent TSF read. The two register halves are
+# not latched, so the read order is the whole correctness argument, and on a
+# bench a wrong order only shows for a few hundred microseconds every 71.6 min.
+# The cell sweeps a scripted counter across the low-word wrap and requires the
+# pre-fix order to tear in the same sweep. Header-only; no libusb.
+add_executable(Mt7612uTsfReadSelftest
+    tests/mt7612u_tsf_read_selftest.cpp
+)
+target_link_libraries(Mt7612uTsfReadSelftest PRIVATE devourer)
+
+add_test(NAME mt7612u_tsf_read COMMAND Mt7612uTsfReadSelftest)
+
+# The C entry points' failure contract, which the cell above cannot reach: a
+# failed read must be distinguishable from a value, because 0xffffffff is a
+# legitimate register word on this part. Needs the subtree's symbols, so it is
+# gated on DEVOURER_MT7612U (CI's MediaTek jobs turn it on).
+if(DEVOURER_MT7612U)
+    add_executable(Mt7612uTsfApiSelftest
+        tests/mt7612u_tsf_api_selftest.cpp
+    )
+    target_link_libraries(Mt7612uTsfApiSelftest PRIVATE devourer)
+    target_include_directories(Mt7612uTsfApiSelftest PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/mt7612u/include)
+
+    add_test(NAME mt7612u_tsf_api COMMAND Mt7612uTsfApiSelftest)
+endif()
+
 # Headless guard for the TX quiesce seam (ITransport::quiesce_tx via
 # RtlAdapter): the explicit "stop TX and wait it out" call every device makes
 # before anything is released. UsbTransport's cancel/drain is validated on
@@ -958,13 +1012,61 @@ target_link_libraries(ReceiptSelftest PRIVATE devourer)
 add_test(NAME receipt_roundtrip COMMAND ReceiptSelftest)
 
 # Headless guard for the active idle-noise-floor math (src/NoiseFloorMath.h): the
-# phydm sign/pwdb helpers the Jaguar1 0x0FA0 debug-port measurement uses. Pure
-# math, header-only.
+# phydm sign/pwdb helpers the Jaguar1 0x0FA0 debug-port measurement uses, and
+# the Jaguar3 NHM absolute floor (nf::nhm_abs_floor_dbm incl. the frozen-
+# estimate guard) with the read_nhm/read_nhm_absolute recipe against a fake BB
+# (the th[8..10] double-shift regression). Pure math, header-only.
 add_executable(NoiseFloorMathSelftest tests/noise_floor_math_selftest.cpp)
 target_include_directories(NoiseFloorMathSelftest PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 add_test(NAME noise_floor_math COMMAND NoiseFloorMathSelftest)
+
+# Headless guard for src/BulkOutTimeout.h: a multi-packet bulk-OUT is never
+# given a timeout (a cancel mid-transfer lets another sender's queued bytes
+# splice into the packet and wedges the Realtek TXDMA). Pure, header-only.
+add_executable(BulkOutTimeoutSelftest tests/bulk_out_timeout_selftest.cpp)
+target_include_directories(BulkOutTimeoutSelftest PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+
+add_test(NAME bulk_out_timeout COMMAND BulkOutTimeoutSelftest)
+# Headless guard for the NHM utility reduction (src/NhmEnvMath.h): bucket
+# weights, the rounded ratio helper shared with CLM, and the noise-floor-cluster
+# exclusion that makes nhm_env_ratio usable where the naive ratio rails. Pure
+# math, header-only.
+add_executable(NhmEnvMathSelftest tests/nhm_env_math_selftest.cpp)
+target_include_directories(NhmEnvMathSelftest PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+# Standalone (does not link `devourer`, so it does not inherit that target's
+# PUBLIC cxx_std_20) and the header uses inline constexpr variables, which MSVC
+# rejects below /std:c++17.
+target_compile_features(NhmEnvMathSelftest PRIVATE cxx_std_20)
+
+add_test(NAME nhm_env_math COMMAND NhmEnvMathSelftest)
+
+# Headless guard for the vendor-neutral ChannelBusy conversions (src/RxSense.h):
+# the Realtek RxEnergy reduction and the MediaTek channel-timer ratio. Pure
+# arithmetic, header-only. The load-bearing case is the refusal — a counter that
+# was never armed must report NO reading, never 0% busy.
+add_executable(ChannelBusySelftest tests/channel_busy_selftest.cpp)
+target_include_directories(ChannelBusySelftest PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_features(ChannelBusySelftest PRIVATE cxx_std_20)
+
+add_test(NAME channel_busy_math COMMAND ChannelBusySelftest)
+
+# Headless guard for the CLM busy-window state machine (src/BusyWindow.h) with
+# mocked register access — the clamp, the CLM-only arm sequence (NHM's half of
+# the shared period dword must not move), the period-bounded ratio, and every
+# way a window stops describing the caller's dwell. Those refusals are the
+# point: on the 11AC map a spoiled window reads 3-4 points high, which no
+# consumer can tell from a real channel.
+add_executable(BusyWindowSelftest tests/busy_window_selftest.cpp)
+target_include_directories(BusyWindowSelftest PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_features(BusyWindowSelftest PRIVATE cxx_std_20)
+
+add_test(NAME busy_window_state COMMAND BusyWindowSelftest)
 
 # Headless round-trip guard for the 802.11ax HE TX radiotap path
 # (src/RadiotapBuilder.cpp build_he + the shared Radiotap.c field-23 size entry
@@ -1155,6 +1257,35 @@ target_link_libraries(LinkHealthSelftest PRIVATE devourer)
 
 add_test(NAME link_health_classify COMMAND LinkHealthSelftest)
 
+# Headless guard for the scout energy read's register arithmetic
+# (src/jaguar3/ScoutEnergyMath.h): FA vendor sum + reset dword composition.
+add_executable(ScoutEnergySelftest tests/scout_energy_selftest.cpp)
+target_link_libraries(ScoutEnergySelftest PRIVATE devourer)
+add_test(NAME scout_energy_math COMMAND ScoutEnergySelftest)
+
+# Headless guard for the busy-NHM register composers (src/jaguar3/NhmBusyMath.h).
+add_executable(NhmBusySelftest tests/nhm_busy_selftest.cpp)
+target_link_libraries(NhmBusySelftest PRIVATE devourer)
+add_test(NAME nhm_busy_math COMMAND NhmBusySelftest)
+
+# Headless guard for the ITransport::ctrl_batch contract against a fake
+# transport (synchronous default only).
+add_executable(CtrlBatchSelftest tests/ctrl_batch_selftest.cpp)
+target_include_directories(CtrlBatchSelftest PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+add_test(NAME ctrl_batch_semantics COMMAND CtrlBatchSelftest)
+
+# Headless guard for the ONE silent-corruption path on the batched scout read:
+# GetRxEnergyScout must not compose its 0x1d2c/0x1eb4 BB reset out of a FAILED
+# read. Unlike ctrl_batch_semantics this drives the real RtlJaguar3Device over
+# a fake transport, because the bug is at that level and has no observable
+# symptom short of a permanently deaf receiver.
+if(DEVOURER_JAGUAR3)
+    add_executable(ScoutBatchFailSelftest tests/scout_batch_fail_selftest.cpp)
+    target_link_libraries(ScoutBatchFailSelftest PRIVATE devourer)
+    add_test(NAME scout_batch_fail COMMAND ScoutBatchFailSelftest)
+endif()
+
 # Headless guard for the adapter-health classifier + EFUSE-stability probe
 # loop (src/AdapterHealth.h) — the verdict mapping behind examples/doctor,
 # with cases encoding the verdicts measured on a real dying unit vs its
@@ -1194,6 +1325,15 @@ add_executable(AdapterCapsSelftest
 target_link_libraries(AdapterCapsSelftest PRIVATE devourer)
 
 add_test(NAME adapter_caps_derive COMMAND AdapterCapsSelftest)
+
+# Headless guard for the pre-open device probe (src/DeviceProbe.h): its
+# id dispatch must stay in step with WiFiDriver::CreateRadio.
+add_executable(DeviceProbeSelftest
+    tests/device_probe_selftest.cpp
+)
+target_link_libraries(DeviceProbeSelftest PRIVATE devourer)
+
+add_test(NAME device_probe_dispatch COMMAND DeviceProbeSelftest)
 
 if(DEVOURER_8733B)
     add_executable(Rtl8733bEfuseSelftest
@@ -1325,6 +1465,18 @@ add_test(NAME scan_plan_policy COMMAND ScanPlanSelftest)
 add_executable(SurveyAggSelftest tests/survey_agg_selftest.cpp)
 target_link_libraries(SurveyAggSelftest PRIVATE devourer)
 add_test(NAME survey_aggregate COMMAND SurveyAggSelftest)
+
+# The executor gate (src/sensing/): the dwell phase machine against a scripted
+# fake radio and a scripted clock — discard-barrier ordering, the FastRetune
+# width-restoration rule after a full-width dwell, counter plausibility at the
+# exact ceiling, the read-failure latch, the retune-throw paths, frame
+# attribution as configuration, a non-Realtek radio still producing evidence,
+# and round/seq bookkeeping against the real ScanScheduler. This loop was demo
+# code until now; a regression in it used to be findable only on air.
+add_executable(DwellExecSelftest tests/dwell_exec_selftest.cpp)
+target_link_libraries(DwellExecSelftest PRIVATE devourer)
+
+add_test(NAME dwell_executor COMMAND DwellExecSelftest)
 
 # The #277 gate: the RecommendEngine's two-leg policy over the issue's ten
 # offline scenarios (recommend / hold-healthy / weak!=congestion / saturation

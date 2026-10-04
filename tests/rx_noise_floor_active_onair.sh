@@ -14,8 +14,14 @@
 #     0x80/0x00 sentinels between idle gaps), so it returns valid data on some
 #     reads and null on others; poll until valid. When valid it cross-matches the
 #     Jaguar1 floor on the same channel.
-#   - Jaguar3 (8822C/8822E): no vendor idle-noise path -> always null (the
-#     passive rssi-snr floor is its only floor).
+#   - Jaguar3 (8822C/8822E): no vendor idle-noise path; the floor is the vendor
+#     ACS's NHM method instead (absolute thresholds, cca/tx-on excluded, weighted
+#     bucket average, src/NoiseFloorMath.h). BB-driven, no clock-stop ->
+#     wedge-free by nature; 3 dB bucket resolution near the floor. The BB
+#     reports a frozen (single-bucket) estimate for the first seconds and on
+#     2.4 GHz, rejected as null; use a 5 GHz channel and a run long enough
+#     to settle (DUR >= 10 s). On-air: -95/-96 dBm on 5 GHz, two 8812EU units
+#     (see docs/rx-spectrum-sensing.md for the frozen-estimate caveat).
 #
 # Two checks (a monotonic-vs-injected-noise sweep is NOT included: the bench B210
 # is too weakly coupled to the RTL front ends to move the floor above the
@@ -37,7 +43,7 @@ mkdir -p "$OUT"
 
 VID=0x0bda
 J1_PID=0x8812             # RTL8812AU (Jaguar1 active-sampling CAL die)
-J3_PID=0xa81a             # RTL8812EU (Jaguar3, no vendor path -> null)
+J3_PID=0xa81a             # RTL8812EU (Jaguar3, NHM idle-window floor)
 J2_VID=0x2357 J2_PID=0x012d   # RTL8812BU / Archer T3U (Jaguar2 8822B cut)
 
 plugged() { lsusb -d "$(printf '%04x:%04x' "$2" "$1")" >/dev/null 2>&1; }
@@ -95,16 +101,39 @@ else
 fi
 if plugged "$J3_PID" "$VID"; then
   unbind "$J3_PID"; j3=$(floor "$J3_PID" "$VID" "$CH_5G")
-  echo "  Jaguar3 8812EU floor: $j3 (expect null — no vendor path)"
+  # The J3 passive floor (rssi-snr, always on) on the same run is the in-chip
+  # cross-check for the NHM idle window.
+  j3p=$(sudo env DEVOURER_PID="$J3_PID" DEVOURER_VID="$VID" DEVOURER_CHANNEL="$CH_5G" \
+    DEVOURER_RXQUALITY=1 DEVOURER_RX_ENERGY_MS=500 \
+    timeout "$DUR" "$ROOT/build/rxdemo" 2>/dev/null \
+    | grep '"ev":"rx.quality"' | python3 -c '
+import sys,json,statistics as st
+v=[json.loads(l).get("noise_floor_dbm") for l in sys.stdin]
+v=[x for x in v if isinstance(x,(int,float))]
+print(int(st.median(v)) if v else "null")')
+  echo "  Jaguar3 8812EU floor: $j3 dBm (NHM idle window; passive rssi-snr floor $j3p dBm)"
+else
+  j3="n/a"; j3p="n/a"; echo "  Jaguar3: not plugged"
 fi
-python3 - "$j1" "$j2" <<'PYEOF'
+python3 - "$j1" "$j2" "$j3" "$j3p" <<'PYEOF'
 import sys
 def num(x):
     try: return int(x)
     except: return None
-j1, j2 = num(sys.argv[1]), num(sys.argv[2])
+j1, j2, j3, j3p = (num(a) for a in sys.argv[1:5])
 ok = j1 is not None and -105 <= j1 <= -70
 print(f"  Jaguar1 in plausible band [-105,-70]: {'PASS' if ok else 'FAIL'}")
+if j3 is not None:
+    ok3 = -105 <= j3 <= -70
+    print(f"  Jaguar3 NHM floor in idle-floor band [-105,-70]: {'PASS' if ok3 else 'FAIL'}")
+    if j3p is not None:
+        print(f"  J3 NHM vs passive floor, delta {abs(j3-j3p)} dB: "
+              f"{'PASS' if abs(j3-j3p) <= 8 else 'INSPECT'}")
+    if j1 is not None:
+        print(f"  J1/J3 both in idle-floor band, delta {abs(j1-j3)} dB: "
+              f"{'PASS' if ok and ok3 and abs(j1-j3) <= 15 else 'INSPECT'}")
+elif len(sys.argv) > 3 and sys.argv[3] != "n/a":
+    print("  Jaguar3 NHM floor: null on every read -> FAIL (expected a floor on a quiet 5 GHz channel)")
 if j1 is not None and j2 is not None:
     # J2's 8822B report is coarse/best-effort; agreement to ~15 dB (both in the
     # idle-floor band) is the meaningful cross-chip check, not a tight match.

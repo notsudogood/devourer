@@ -86,7 +86,7 @@ public:
   /* EFUSE MAC at logical 0x107 (both dies — see HalJaguar2::perm_mac). */
   bool GetPermanentMacAddress(uint8_t out[6]) override;
   uint64_t ReadTsf() override;
-  void WriteTsf(uint64_t tsf) override;
+  bool WriteTsf(uint64_t tsf) override;
   bool StartBeacon(const uint8_t *beacon, size_t len, int interval_tu) override;
   /* In-place beacon content swap (IRadio contract): retain the new MPDU +
    * ride the steer re-download; interval/TBTT/port identity untouched. */
@@ -208,6 +208,25 @@ public:
   bool la_capture_wedged() const { return _la && _la->is_wedged(); }
 
 private:
+  /* This generation's CCX map and register access, under its locks — see
+   * IRtlRadio::with_ccx. Private: the base class calls it, nobody else. */
+  bool with_ccx(const CcxFn &fn) override {
+    /* Nothing to lend before bring-up: the BB is not programmed, and a
+     * window armed against it would be forgotten by Init/InitWrite's reset. */
+    if (!_brought_up)
+      return false;
+    std::lock_guard<std::mutex> reg(_reg_mu);
+    std::lock_guard<std::mutex> ccx(busy_window_mutex());
+    const Read32 rd = [this](uint16_t a) {
+      return _device.rtw_read<uint32_t>(a);
+    };
+    const SetBb wr = [this](uint16_t a, uint32_t m, uint32_t v) {
+      _device.phy_set_bb_reg(a, m, v);
+    };
+    fn(devourer::nhm_regs_11ac(), rd, wr);
+    return true;
+  }
+
   /* Golden-init replay (DEVOURER_REPLAY_WSEQ) — applied at the end of both
    * Init and InitWrite (see the definition for semantics). */
   void apply_replay_wseq();
@@ -236,6 +255,24 @@ private:
   jaguar2::HalmacJaguar2MacInit _macinit;
   jaguar2::HalmacJaguar2Fw _fw;
   SelectedChannel _channel{};
+  /* Mirrors _channel.ChannelWidth as a devourer bw code (0/1/2 = 20/40/80 MHz)
+   * so the RX completion handler reads the tuned width without taking
+   * _reg_mu: parse_phy_sts_jgr2 resolves rxsc 0 ("full configured
+   * bandwidth", phydm_rxsc_2_bw) against it. Written wherever the tuned width
+   * changes (Init, InitWrite, SetMonitorChannel, FastSetBandwidth). */
+  std::atomic<uint8_t> _rx_bw_code{0};
+  /* ChannelWidth_t -> devourer RX bw code. An explicit switch, not a cast;
+   * narrowband 5/10 MHz has no bw code and folds to 20. */
+  static uint8_t channel_width_to_bw_code(ChannelWidth_t w) {
+    switch (w) {
+    case CHANNEL_WIDTH_40:
+      return 1;
+    case CHANNEL_WIDTH_80:
+      return 2;
+    default:
+      return 0;
+    }
+  }
   Action_ParsedRadioPacket _packetProcessor = nullptr;
   /* Runtime TX-power knobs (atomic so GetTxPowerState's cached snapshot is
    * readable cross-thread; setters are control-plane-thread calls). Flat

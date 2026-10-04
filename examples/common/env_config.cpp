@@ -96,6 +96,7 @@ devourer::DeviceConfig devourer_config_from_env() {
     cfg.tx.ep = static_cast<uint8_t>(v);
   if (env_long("DEVOURER_TX_TIMEOUT_MS", &v))
     cfg.tx.timeout_ms = static_cast<unsigned>(v);
+  cfg.tx.no_cancel_multipkt = env_flag("DEVOURER_TX_NO_CANCEL_MULTIPKT");
   cfg.tx.legacy_8812_desc = env_flag("DEVOURER_TX_LEGACY_8812_DESC");
   if (env_long("DEVOURER_TX_PWR", &v))
     cfg.tx.power_index = static_cast<int>(v & 0x3f);
@@ -162,6 +163,10 @@ devourer::DeviceConfig devourer_config_from_env() {
    * library nor the device class consults ambient process state. */
   if (const char *e = env_str("DEVOURER_MT7612U_FW_DIR"))
     cfg.mt7612u.firmware_dir = std::string(e);
+  /* Only an explicit "0" disables the tick: a typo must not silently turn
+   * off the receiver's calibration. */
+  if (const char *e = env_str("DEVOURER_MT7612U_PHY_TICK"))
+    cfg.mt7612u.phy_tick = std::strcmp(e, "0") != 0;
 
   /* ---- tuning ---- */
   /* Defaults ON, so this reads the negation: only an explicit 0 disables it. */
@@ -268,6 +273,8 @@ devourer::DeviceConfig devourer_config_from_env() {
     cfg.usb.lock_dir = e;
   if (env_str("DEVOURER_RX_ZEROCOPY")) /* default true; =0 forces the heap path */
     cfg.usb.rx_zerocopy = env_flag("DEVOURER_RX_ZEROCOPY");
+  if (env_str("DEVOURER_CTRL_BATCH")) /* default true; =0 = synchronous */
+    cfg.usb.ctrl_batch = env_flag("DEVOURER_CTRL_BATCH");
 
   return cfg;
 }

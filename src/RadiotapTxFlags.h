@@ -14,6 +14,23 @@ extern "C" {
 
 namespace devourer {
 
+/* Devourer-private TX_FLAGS bit: "never aggregate this frame". With an A-MPDU
+ * session on (SetAmpduMode), every frame is otherwise AGG_EN on one queue and
+ * the MAC folds consecutive frames into one PPDU aired at its FIRST MPDU's
+ * rate and bandwidth — a frame's own MCS/BW/LDPC/STBC are silently dropped
+ * (measured on the 8812EU: 62 % of MCS0 frames aired at MCS5 when alternated
+ * with MCS5 at saturation, ~40 % of 20 MHz frames aired at 40 MHz). A
+ * no_agg frame is written AGG_EN=0 + BK=1 (break), the vendor rtl8822eu
+ * xmit recipe for frames that must go out alone (EAPOL/ARP/DHCP), so it airs
+ * as its own PPDU with its own rate/bw. Radiotap defines TX_FLAGS bits
+ * 0x0001..0x0020; this one sits well above them. Honoured by Jaguar3 only;
+ * other generations ignore it. */
+constexpr uint16_t kRadiotapTxFlagNoAgg = 0x0100;
+
+inline bool radiotap_tx_no_agg(uint16_t tx_flags) {
+  return (tx_flags & kRadiotapTxFlagNoAgg) != 0;
+}
+
 struct RadiotapMcsField {
   bool have_mcs = false;
   uint8_t mcs = 0;   /* HT MCS index 0..31, valid when have_mcs */

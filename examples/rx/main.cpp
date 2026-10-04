@@ -105,7 +105,9 @@ static constexpr uint16_t kRealtekProductIds[] = {
     0xb733, /* RTL8733BU combo module Wi-Fi function (vendor ID table) */
 };
 
-static int g_rx_count = 0;
+/* Written on the RX callback thread, read by the main thread and the pollers
+ * as the "bring-up produced a frame" signal, so atomic. */
+static std::atomic<int> g_rx_count{0};
 #if defined(DEVOURER_HAVE_JAGUAR1)
 static RtlJaguarDevice *g_rtl_device = nullptr;
 #endif
@@ -301,6 +303,27 @@ static const uint32_t g_thermal_poll_ms = []() -> uint32_t {
 static const int g_thermal_warn_delta = []() -> int {
   const char *e = std::getenv("DEVOURER_THERMAL_WARN_DELTA");
   return e ? std::atoi(e) : 15;
+}();
+
+/* DEVOURER_RX_BUSY_MS=N: the vendor-neutral busy-airtime window
+ * (IRadio::ArmChannelBusy / GetChannelBusy) at a fixed cadence, one `rx.busy`
+ * event per window. Arms, sleeps the window, reads — the survey executor's
+ * dwell shape (src/sensing/), so this is what "polling at dwell cadence" costs
+ * a receiver. Works on every backend that reports busy_airtime_ok; elsewhere
+ * the event carries valid=false. 0 = disabled. Unlike DEVOURER_RX_ENERGY_MS
+ * this needs no IRtlRadio. */
+static const uint32_t g_rx_busy_ms = []() -> uint32_t {
+  const char *e = std::getenv("DEVOURER_RX_BUSY_MS");
+  if (!e)
+    return 0u;
+  char *end = nullptr;
+  const unsigned long long v = std::strtoull(e, &end, 0);
+  /* Reject anything but a whole non-negative number, and cap so that the
+   * microsecond form handed to ArmChannelBusy cannot wrap. */
+  if (end == e || *end != '\0' || *e == '-')
+    return 0u;
+  const unsigned long long cap = UINT32_MAX / 1000u;
+  return static_cast<uint32_t>(v > cap ? cap : v);
 }();
 
 /* DEVOURER_RX_DUMP_CSI=hex,hex,... (or "0x1a,0x20,0x40"): F2 research
@@ -702,6 +725,25 @@ static const bool g_rx_pctr = []() {
  * interferer); `busy` = percent of samples above the lowest bucket; `hist` =
  * the 12 raw bucket counts (IGI-referenced, low→high power). ch<0 omits the
  * channel field (steady-state emitter); ch>=0 tags it (sweep). */
+/* The two CCX window products, appended to both rx.energy emitters.
+ *
+ * `clm` is busy AIRTIME percent (hardware 4 us ticks with CCA asserted) and
+ * `nhm_env` is the percent of the NHM histogram sitting above the receiver's
+ * own noise floor. Read them together: energy that lifts nhm_env without
+ * lifting clm is an emitter the baseband does not recognise as 802.11 — which
+ * is exactly what a frame sniffer reports as a free channel. Both go null when
+ * the generation or the window did not produce them. */
+static void emit_ccx(devourer::Ev &ev, const RxEnergy &e) {
+  if (e.valid_clm)
+    ev.f("clm", e.clm_ratio_pct);
+  else
+    ev.f("clm", nullptr);
+  if (e.valid_nhm)
+    ev.f("nhm_env", e.nhm_env_ratio_pct);
+  else
+    ev.f("nhm_env", nullptr);
+}
+
 static void emit_nhm(const RxEnergy &e, int ch) {
   if (!e.valid_nhm)
     return;
@@ -717,8 +759,13 @@ static void emit_nhm(const RxEnergy &e, int ch) {
   devourer::Ev ev(*g_ev, "rx.nhm");
   if (ch >= 0)
     ev.f("ch", ch);
-  ev.f("peak", peak_k).f("busy", busy).f("dur", e.nhm_duration)
-      .arr("hist", hist, 12);
+  /* `busy` is the naive mass-above-bucket-0 and rails at ~100 on a quiet
+   * channel; `ratio` is the vendor's rounded form of the same thing, and `env`
+   * is that with the receiver's own floor cluster removed. Compare arms on
+   * `env`. */
+  ev.f("peak", peak_k).f("busy", busy)
+      .f("ratio", e.nhm_ratio_pct).f("env", e.nhm_env_ratio_pct)
+      .f("dur", e.nhm_duration).arr("hist", hist, 12);
 }
 
 static void packetProcessor(const Packet &packet) {
@@ -994,7 +1041,7 @@ static void packetProcessor(const Packet &packet) {
 
   if (g_rx_count <= 10 || g_rx_count % 100 == 0) {
     devourer::Ev(*g_ev, "rx.pkt")
-        .f("n", g_rx_count)
+        .f("n", g_rx_count.load())
         .f("len", packet.Data.size())
         .f("rate", packet.RxAtrib.data_rate)
         .f("rssi", packet.RxAtrib.rssi[0]);
@@ -1069,7 +1116,7 @@ static void packetProcessor(const Packet &packet) {
          * RX decoded LDPC). */
         devourer::Ev(*g_ev, "rx.txhit")
             .f("hits", hits)
-            .f("total_rx", g_rx_count)
+            .f("total_rx", g_rx_count.load())
             .f("len", packet.Data.size())
             .f("seq", packet.RxAtrib.seq_num)
             .f("paggr", packet.RxAtrib.paggr ? 1 : 0)
@@ -1250,6 +1297,15 @@ int main(int argc, char **argv) {
   /* SIGINT/SIGTERM -> clean shutdown (Stop() below). Without this the harness's
    * `timeout` SIGTERM killed us mid-RX, leaving the chip's USB core hung. */
   install_devourer_signal_handlers();
+  /* Knob combinations that cannot work are refused here, before any thread
+   * exists: a later return would destroy a joinable poller thread. */
+  if (g_rx_busy_ms > 0 &&
+      (!g_rx_sweep.empty() || std::getenv("DEVOURER_HOP_CHANNELS"))) {
+    logger->error("DEVOURER_RX_BUSY_MS: refused with DEVOURER_RX_SWEEP / "
+                  "DEVOURER_HOP_CHANNELS — those retune from the main thread, "
+                  "and the busy window is a single-control-thread contract");
+    return 2;
+  }
 
   /* Owns the teardown order (device -> interface -> handle -> context; see
    * DeviceSession.h). Declared before every thread below, so the threads are
@@ -1531,6 +1587,70 @@ int main(int argc, char **argv) {
   }
 #endif /* DEVOURER_HAVE_JAGUAR1 */
 
+  /* Vendor-neutral busy-airtime poller: arm, wait the window, read, emit.
+   * ArmChannelBusy/GetChannelBusy are control-plane calls with a
+   * single-control-thread contract, so this runs only where the main thread
+   * has nothing left to do to the radio once bring-up is done: it refuses the
+   * sweep and hop modes (which retune from the main thread — a retune spoils
+   * the window by contract, and interleaving two control callers is what the
+   * contract forbids), and its first arm waits for bring-up to have produced
+   * a frame, like the sweep does, instead of racing Init(). */
+  std::atomic<bool> busy_emitter_stop{false};
+  std::thread busy_emitter;
+  if (g_rx_busy_ms > 0) {
+    logger->info("DEVOURER_RX_BUSY_MS={} — starting channel-busy poller",
+                 g_rx_busy_ms);
+    IRadio *dev = rtlDevice;
+    busy_emitter = std::thread([&busy_emitter_stop, dev, logger]() {
+      /* Bring-up runs on the main thread. The first RX frame is the proof it
+       * finished; on a silent channel the fallback is the window's own gate -
+       * every backend refuses ArmChannelBusy (returns 0) until it is brought
+       * up, so an arm that is refused is retried, never read. */
+      for (uint32_t s = 0;
+           s < 10000 && !busy_emitter_stop.load() && g_rx_count.load() == 0;
+           s += 50)
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      bool waited_on_gate = false;
+      while (!busy_emitter_stop.load()) {
+        const uint32_t armed = dev->ArmChannelBusy(g_rx_busy_ms * 1000u);
+        if (armed == 0) {
+          if (!waited_on_gate)
+            logger->info("DEVOURER_RX_BUSY_MS: arm refused (not brought up "
+                         "yet, or no sensor) — retrying until accepted");
+          waited_on_gate = true;
+          for (uint32_t s = 0; s < 500 && !busy_emitter_stop.load(); s += 50)
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+          continue;
+        }
+        const auto until = std::chrono::steady_clock::now() +
+                           std::chrono::milliseconds(g_rx_busy_ms);
+        while (!busy_emitter_stop.load()) {
+          const auto left = until - std::chrono::steady_clock::now();
+          if (left <= std::chrono::steady_clock::duration::zero())
+            break;
+          const auto step = std::chrono::milliseconds(50);
+          std::this_thread::sleep_for(left < step ? left : step);
+        }
+        if (busy_emitter_stop.load())
+          break;
+        const devourer::ChannelBusy b = dev->GetChannelBusy();
+        devourer::Ev ev(*g_ev, "rx.busy");
+        ev.t().f("armed_us", armed).f("valid", b.valid);
+        if (b.valid_busy)
+          ev.f("busy_pct", b.busy_pct);
+        else
+          ev.f("busy_pct", nullptr);
+        if (b.valid_energy)
+          ev.f("energy_pct", b.energy_pct);
+        else
+          ev.f("energy_pct", nullptr);
+        ev.f("window_us", b.window_us)
+            .f("own_tx", b.own_tx_in_window)
+            .f("spoil", static_cast<int>(b.spoil));
+      }
+    });
+  }
+
   /* Cross-generation thermal telemetry. GetThermalStatus is part of IRadio
    * (Jaguar1/2/3, Kestrel, and RTL8733B); using the base pointer is what makes
    * DEVOURER_THERMAL_POLL_MS work on RTL8812EU and newer backends instead of
@@ -1630,6 +1750,7 @@ int main(int argc, char **argv) {
             ev.f("abs_noise_floor_dbm", e.abs_noise_floor_dbm);
           else
             ev.f("abs_noise_floor_dbm", nullptr);
+          emit_ccx(ev, e);
           ev.f("frames", agg.n)
               .f("frames_ldpc", agg.n_ldpc)
               .f("frames_stbc", agg.n_stbc)
@@ -1690,7 +1811,7 @@ int main(int argc, char **argv) {
           ev.f("cause", h.cause).f("fix", h.fix);
         }
         /* DEVOURER_RXQUALITY=1 — dogfood the library GetRxQuality() feed: the
-         * same window a linked controller (fluke_gs) would read, incl. the
+         * same window a linked adaptive-link controller would read, incl. the
          * passive noise-floor. NB it drains the device-internal accumulator +
          * calls GetRxEnergy itself, so its counters are independent of the
          * rx.energy/link.health events above (which use the
@@ -1701,9 +1822,11 @@ int main(int argc, char **argv) {
           ev.f("verdict", q.label)
               .f("frames", q.frames)
               .f("rssi_mean_dbm", q.rssi_mean_dbm)
-              .f("rssi_max_dbm", q.rssi_max_dbm)
-              .f("snr_mean_db", q.snr_mean_db)
-              .f("snr_min_db", q.snr_min_db);
+              .f("rssi_max_dbm", q.rssi_max_dbm);
+          if (q.snr_valid)
+            ev.f("snr_mean_db", q.snr_mean_db).f("snr_min_db", q.snr_min_db);
+          else
+            ev.f("snr_mean_db", nullptr).f("snr_min_db", nullptr);
           if (q.evm_valid)
             ev.f("evm_db", q.evm_mean_db);
           else
@@ -1714,7 +1837,8 @@ int main(int argc, char **argv) {
             ev.f("noise_floor_dbm", nullptr);
           /* Active/frame-free absolute floor (DEVOURER_RX_NOISE_FLOOR): the
            * companion to the passive floor above. Null unless opted-in AND the
-           * generation supports it (Jaguar2 live / Jaguar1 8812A CAL). */
+           * generation supports it (Jaguar2 live, Jaguar1 8812A CAL,
+           * Jaguar3/Kestrel NHM idle window). */
           if (q.abs_nf_valid)
             ev.f("abs_noise_floor_dbm", q.abs_noise_floor_dbm);
           else
@@ -1762,6 +1886,9 @@ int main(int argc, char **argv) {
     qd_emitter_stop = true;
 #endif
     energy_emitter_stop = true;
+    busy_emitter_stop = true;
+    if (busy_emitter.joinable())
+      busy_emitter.join();
     if (therm_emitter.joinable())
       therm_emitter.join();
 #if defined(DEVOURER_HAVE_JAGUAR1)
@@ -2152,6 +2279,11 @@ int main(int argc, char **argv) {
           ev.f("igi", e.igi);
         else
           ev.f("igi", nullptr);
+        if (e.valid_noise_floor) /* active absolute floor (opt-in), per bin */
+          ev.f("abs_noise_floor_dbm", e.abs_noise_floor_dbm);
+        else
+          ev.f("abs_noise_floor_dbm", nullptr);
+        emit_ccx(ev, e);
         ev.f("retune_us", retune_us)
             .f("frames", agg.n)
             .f("frames_ldpc", agg.n_ldpc)

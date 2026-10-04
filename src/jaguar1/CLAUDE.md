@@ -39,6 +39,18 @@ methods), `RadioManagementModule` (channel/BW/TX power, up to 4 RF paths),
 
 ## Teardown
 
+**`Stop()` forgets any armed busy window** — the rule, and the residual it
+does not close, are at `IRadio::ArmChannelBusy`, the one declaration site
+where they can be kept true. What is specific to this die:
+
+Measured on an RTL8812AU with the reset removed: arm, `Stop()`, retune, read
+reports `spoil=retuned` — a reason earned by a session that no longer exists;
+with it, `spoil=none` and no reading (this die's `Stop()` powers the card
+down). The reset sits ABOVE the `teardown_power_down=0` early return, so the
+"leave the chip powered" path forgets the window too. It takes the CCX lock
+alone: this generation has no family-wide register lock to order against
+(`_port0_mu` is narrower and never taken under the CCX lock).
+
 `RtlJaguarDevice::Stop()` and the destructor run `HalModule::rtw_hal_deinit()`:
 halt the MAC engines (`REG_CR`, `REG_RCR`), then the die's card-disable power
 sequence via the existing `HalPwrSeqCmdParsing` (`rtl8812_card_disable_flow` /
@@ -84,3 +96,28 @@ rate-independent, so neither can implement the other.
   `FastSetTxPowerOffsetQdb` (BB-swing TxScale `0xc1c/0xe1c`: global
   per-burst, 1–4 writes, 0.5 dB steps, −12..+2 dB, folded through the 8812A
   thermal tracker; on-air-validated on the 8812AU).
+
+## CCX energy sensing (`clm` / `nhm_env`)
+
+`GetRxEnergy(with_nhm=true)` runs the shared CCX window (`src/NhmReader.h`) on
+the 11AC register map — the same map validated on the Jaguar2 8822BU, so CLM
+lands here with no Jaguar1-specific code. **Measured on an RTL8812AU**
+(`docs/rx-spectrum-sensing.md`): a 240 ms armed window read 70.6-70.9% against
+a flooder a MediaTek adapter independently measured, 0.1-1.0% on a quiet
+channel, so `busy_airtime_measured` is true.
+
+Window behaviour matches the Jaguar2 and NOT the Jaguar3: an NHM read inside an
+armed window leaves it readable but 4 points HIGH (74.8 vs 70.9), where the
+JGR3 map truncates it to the 2 ms re-arm. Both are spoiled — `ClmWindow`
+invalidates either way — but only one of them looks broken, which is why the
+rule is enforced per family rather than per symptom.
+
+The `nhm_env` reduction is referenced to the live IGI, so what matters is how
+far DIG may walk it. `PhydmWatchdog` clamps to `0x1c`–`0x2a` (14 steps,
+`PhydmWatchdog.h`) — but the watchdog is **opt-in** (`DEVOURER_PHYDM_WATCHDOG=1`,
+`HalModule.cpp`; the default path runs watchdog-less because its BB traffic cost
+4500→1000 TX submits on an 8821 and 2300→0 RX hits on an 8814). A default
+session therefore walks IGI not at all, a stiffer reference than Jaguar3's
+4-step clamp, so `nhm_env` should behave like the 8812CU rather than the
+8822BU — and should degrade toward the 8822BU once the watchdog is enabled and
+hands DIG 14 steps of travel. Predicted from those constants, not measured.

@@ -269,6 +269,46 @@ struct AdapterCaps {
    * equivalent. */
   bool he_er_su_ok = false;
   bool per_chain_rssi = false;     /* frame parser fills per-chain rssi (>=2ch) */
+
+  /* Frame-free sensing. These exist because a successful
+   * dynamic_cast<IRtlRadio*> is not a correct discriminator and never was: the
+   * RTL8733B derives from IRtlRadio and implements no GetRxEnergy at all, so
+   * the cast reports a sensor that returns nothing.
+   *
+   * The two flags below are also independent of each other, and the RTL8733B
+   * is where that stops being theoretical: it has a working CCX CLM engine
+   * and no phydm FA/CCA block, so busy_airtime_ok is true while rx_energy_ok
+   * is false. Do not read either from the other.
+   *
+   * busy_airtime_ok: the backend HAS a hardware busy-airtime engine that
+   * IRadio::GetChannelBusy can report — the Realtek CCX CLM engine
+   * (Jaguar1/2/3 and the RTL8733B, which the vendor phydm puts on the JGR3
+   * map) or the MediaTek MAC channel timers. FALSE on Kestrel, whose NHM
+   * rides the halbb glue rather than NhmReader, so it has no CLM.
+   *
+   * It does NOT promise that an unarmed GetChannelBusy() answers. On the
+   * RTL8733B it does not: that backend feeds its sampled path from
+   * GetRxEnergy, which it does not implement, so an unarmed call reports no
+   * reading and IRadio::ArmChannelBusy is the only way to get a number out of
+   * it. A consumer that wants a reading from an arbitrary backend should arm
+   * rather than sample; one that samples must handle "no reading" from a
+   * backend whose flag is true.
+   *
+   * busy_airtime_measured: that reading has been separated from a quiet
+   * channel ON AIR for this family, not merely implemented. The harness is
+   * tests/busy_window_probe.sh, which pits an armed window against the quiet
+   * floor under a known load, and against each way a window can be spoiled.
+   * True today on all five backends that set busy_airtime_ok. The flag stays
+   * because the two facts are independent: a port can land the engine before
+   * anyone has run it on air, and false-as-unmeasured is the house rule for
+   * that state.
+   *
+   * rx_energy_ok: IRtlRadio::GetRxEnergy returns real phydm FA/CCA/IGI
+   * counters. Always false on a non-Realtek radio; false on the RTL8733B and
+   * Kestrel, which is exactly the false positive the cast produced. */
+  bool busy_airtime_ok = false;
+  bool busy_airtime_measured = false;
+  bool rx_energy_ok = false;
   /* Hardware timing. hw_rx_timestamp: every received frame is stamped with the
    * MAC's microsecond TSF at receive (RxPacket.RxAtrib.tsfl) — true on all
    * generations. hw_beacon_txtsf: this adapter, as a transmitter, inserts its
@@ -276,9 +316,21 @@ struct AdapterCaps {
    * (a genuine sub-µs TX-egress timestamp a receiver reads via
    * Packet::TxEgressTsf) — rides the hardware beacon function (StartBeacon);
    * true on all generations. Together they are the primitives for one-way
-   * hardware time distribution (see TsfSync). */
+   * hardware time distribution (see TsfSync). tsf_write_ok: IRadio::WriteTsf
+   * drives a standalone write the part's counter loads (the static half of the
+   * WriteTsf contract; its bool return is the per-call transport result).
+   * Readback-measured through WriteTsf: 8822B (Jaguar2; incl. an RTL8812BU,
+   * 40/40 forward and backward writes landed), 8822C (Jaguar3). The
+   * 8821AU (Jaguar1) is measured on the raw REG_TSFTR pair with a scratch probe
+   * (both word orders, no beacon armed), which is exactly what the Jaguar1
+   * WriteTsf writes; the override itself has not run on Jaguar1 hardware. The
+   * 8812A/8814A, 8821C (USB and PCIe) and 8822E ride the same pair and code
+   * path and are not separately measured. FALSE on the MT7612U (measured: its DW0/DW1 registers
+   * do not load the counter, docs/mt7612u.md), and on Kestrel and the RTL8733B
+   * (no TSF write in the source — not a bench fact). */
   bool hw_rx_timestamp = false;
   bool hw_beacon_txtsf = false;
+  bool tsf_write_ok = false;
   /* 802.11ax scheduled UL (Kestrel/RTL8852 only). trigger_ul_ok: the adapter
    * can air an HE Trigger frame (UL-OFDMA grant) and program the fw UL-OFDMA
    * scheduler (SendTrigger / ConfigureUlOfdma). twt_ok: the fw exposes the TWT

@@ -40,6 +40,20 @@ static devourer::RadiotapMcsField decode_ht(const std::vector<uint8_t> &rt) {
   return f;
 }
 
+/* Walk a built radiotap header and return its TX_FLAGS field (0xFFFF = absent). */
+static uint16_t find_tx_flags(const std::vector<uint8_t> &rt) {
+  struct ieee80211_radiotap_iterator it;
+  auto *hdr = reinterpret_cast<struct ieee80211_radiotap_header *>(
+      const_cast<uint8_t *>(rt.data()));
+  if (ieee80211_radiotap_iterator_init(&it, hdr, rt.size(), nullptr) != 0)
+    return 0xFFFF;
+  while (ieee80211_radiotap_iterator_next(&it) == 0) {
+    if (it.this_arg_index == IEEE80211_RADIOTAP_TX_FLAGS)
+      return static_cast<uint16_t>(it.this_arg[0] | (it.this_arg[1] << 8));
+  }
+  return 0xFFFF;
+}
+
 int main() {
   /* HT MCS0/20, LDPC+STBC (mabur's MAX_RANGE control mode). */
   devourer::TxMode m;
@@ -108,6 +122,30 @@ int main() {
   CHECK_EQ(rt[12] & 0x01, 0x01); /* flags: STBC        */
   CHECK_EQ(rt[18] & 0x01, 0x01); /* coding[u0]: LDPC   */
   CHECK_EQ(rt[13], 4);           /* bw code: 80 MHz    */
+
+  /* TxMode::no_agg rides the TX_FLAGS field (devourer-private bit) on every
+   * builder, and a default TxMode stays byte-identical (NoAck only). The
+   * device parsers read it back with radiotap_tx_no_agg(). */
+  {
+    const devourer::TxMode::Mode modes[4] = {
+        devourer::TxMode::Mode::Legacy, devourer::TxMode::Mode::HT,
+        devourer::TxMode::Mode::VHT, devourer::TxMode::Mode::HE};
+    for (const auto mode : modes) {
+      devourer::TxMode t;
+      t.mode = mode;
+      const uint16_t plain = find_tx_flags(devourer::build_stream_radiotap(t));
+      CHECK_EQ(plain, IEEE80211_RADIOTAP_F_TX_NOACK);
+      CHECK_EQ(devourer::radiotap_tx_no_agg(plain), 0);
+      t.no_agg = true;
+      const auto rt_na = devourer::build_stream_radiotap(t);
+      const uint16_t na = find_tx_flags(rt_na);
+      CHECK_EQ(na, IEEE80211_RADIOTAP_F_TX_NOACK | devourer::kRadiotapTxFlagNoAgg);
+      CHECK_EQ(devourer::radiotap_tx_no_agg(na), 1);
+      /* Length is part of the J3 HT-vs-VHT contract (13 = HT/legacy). */
+      t.no_agg = false;
+      CHECK_EQ(rt_na.size(), devourer::build_stream_radiotap(t).size());
+    }
+  }
 
   if (failures) {
     std::fprintf(stderr, "%d failure(s)\n", failures);

@@ -254,8 +254,15 @@ private:
     cell.observe_ms = d.observe_ms;
     const double sec = static_cast<double>(d.observe_ms) / 1000.0;
     if (d.valid_fa && sec > 0) {
-      cell.cca_rate = (d.cca_ofdm + d.cca_cck) / sec;
-      cell.fa_rate = (d.fa_ofdm + d.fa_cck) / sec;
+      /* cca_cck/fa_cck only when valid_cck — a scout-sourced dwell's CCK
+         half is unmeasured (0 with no reset behind it), not a real zero;
+         folding it in un-gated would make scout cells look artificially
+         quieter than full-read cells in the same ring (RxEnergy::valid_cck,
+         RxSense.h). */
+      const uint32_t cck_cca = d.valid_cck ? d.cca_cck : 0;
+      const uint32_t cck_fa = d.valid_cck ? d.fa_cck : 0;
+      cell.cca_rate = (d.cca_ofdm + cck_cca) / sec;
+      cell.fa_rate = (d.fa_ofdm + cck_fa) / sec;
     }
     cell.nhm_busy_pct = d.valid_nhm ? d.nhm_busy_pct : 255;
     if (d.observe_ms > 0) {

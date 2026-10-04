@@ -399,6 +399,14 @@ struct mt7612u_link_stats {
  */
 int mt7612u_link_stats_start(struct mt7612u_dev *dev);
 
+/* Arm the channel timers alone and restart their interval mark, for a caller
+ * measuring one busy window (IRadio::ArmChannelBusy). Separate from
+ * mt7612u_link_stats_start() on purpose: that one also clears the MIB block
+ * and the link-stats interval, which belong to the 1 Hz telemetry caller, and
+ * arming per dwell through it would corrupt every rate the tick reports.
+ * Returns 0 on success. */
+int mt7612u_ch_time_arm(struct mt7612u_dev *dev);
+
 /* Read and clear. Returns 0 on success; fills the interval since the previous
  * call to this function or to _start(). */
 int mt7612u_link_stats(struct mt7612u_dev *dev, struct mt7612u_link_stats *out);
@@ -418,11 +426,70 @@ int mt7612u_link_stats(struct mt7612u_dev *dev, struct mt7612u_link_stats *out);
  * mt7612u_link_stats() will see that column reduced.  Returns 0, or -1 before
  * a channel is set.
  */
+/*
+ * Channel busy/idle only — MT_CH_BUSY / MT_CH_IDLE (0x1134 / 0x1130) and
+ * nothing else.
+ *
+ * Deliberately NOT mt7612u_link_stats(): that function also reads
+ * MT_RX_STAT_1, whose false-CCA field is read-and-clear and is owned by
+ * mt7612u_phy_tick()'s AGC loop. Polling it at a caller's cadence would both
+ * misreport the interference figure and starve the gain tracking of the
+ * evidence it steps on. The channel timers are separate registers with no
+ * other reader inside the library.
+ *
+ * Read-and-clear like everything else here: each call returns the interval
+ * since the previous mt7612u_ch_time() call, tracked on its own per-device
+ * mark so it does not disturb mt7612u_link_stats()'s interval (and vice
+ * versa). Note mt7612u_link_stats() DOES also read and clear these two
+ * registers, so a session polling both splits the counts between them.
+ *
+ * Requires mt7612u_link_stats_start() to have armed the timers, and REFUSES
+ * until it has: the registers retain whatever a previous session left, and a
+ * busy+idle ratio would turn that residue into a perfectly plausible
+ * percentage for a window nobody measured. Arming also resets the interval
+ * mark, and a live channel change re-arms — otherwise the first sample after a
+ * retune would mix the old channel's airtime into the new channel's reading.
+ *
+ * Returns 0 on success, -1 on a bad device, an unarmed timer or a failed read
+ * — never a fabricated value, because a failed control transfer would
+ * otherwise read as a 100%-busy channel.
+ */
+int mt7612u_ch_time(struct mt7612u_dev *dev, uint32_t *busy, uint32_t *idle,
+                    uint32_t *interval_us);
+
+/* Reports, and clears, whether mt7612u_link_stats() read-and-cleared the
+ * channel timers since they were armed — i.e. whether that call took the
+ * counts a ch_time() reading would otherwise claim. The two share
+ * MT_CH_BUSY/MT_CH_IDLE and both clear on read.
+ *
+ * Nothing in Mt7612uRadio polls link_stats(), so this cannot fire through the
+ * IRadio path; it exists for a C-API caller that uses BOTH (tools/bringup.cpp
+ * does), where a window measured across such a poll would otherwise report
+ * the remainder as a full reading. A caller measuring one window treats it as
+ * a spoiled window, never as a quiet channel. */
+int mt7612u_ch_time_disturbed(struct mt7612u_dev *dev);
+
 int mt7612u_phy_tick(struct mt7612u_dev *dev);
 
-/* TSF, the hardware microsecond clock. Two register reads. */
+/*
+ * TSF, the hardware microsecond clock. Read only: there is no load path
+ * (measured, docs/mt7612u.md). Bring-up restarts it near 0 (measured on two
+ * units), so its low word first wraps 71.6 min later - and the two halves are
+ * not latched, so a plain two-register read tears there by 2^32 us. Both
+ * functions read high, low, high and retry across a wrap (three or four control
+ * transfers).
+ *
+ * mt7612u_read_tsf_chk: 0 and fills *out, or -1 on a failed transfer (or a
+ * NULL argument), leaving *out untouched. A separate return is what carries
+ * the failure because no value can: 0xffffffff is a legitimate word here (the
+ * low word passes through it once a wrap), so a sentinel would be a reading.
+ *
+ * mt7612u_read_tsf: the same read with no error channel - 0 on failure. A
+ * running counter never reads 0 after bring-up, but 0 cannot say why; use
+ * _chk wherever a failure has to be told apart.
+ */
+int      mt7612u_read_tsf_chk(struct mt7612u_dev *dev, uint64_t *out);
 uint64_t mt7612u_read_tsf(struct mt7612u_dev *dev);
-void     mt7612u_write_tsf(struct mt7612u_dev *dev, uint64_t tsf);
 
 /* What this adapter can do, so a caller need not assume. */
 struct mt7612u_caps {
@@ -456,6 +523,8 @@ struct mt7612u_caps {
 	unsigned per_chain_rssi : 1;
 	unsigned narrowband : 1;   /* 5/10 MHz - not available on this part */
 	unsigned fast_retune : 1;  /* sub-ms channel change - not on this part */
+	unsigned tsf_write : 1;    /* a TSF load path - none on this part (measured,
+	                            * docs/mt7612u.md); AdapterCaps::tsf_write_ok */
 };
 void mt7612u_get_caps(const struct mt7612u_dev *dev, struct mt7612u_caps *caps);
 

@@ -27,6 +27,7 @@
 #include "NhmReader.h"
 #include "ToneMask.h"
 #include "RateDefinitions.h"
+#include "RtlTsf.h" /* REG_TSFTR read/write shared with Jaguar1/3 */
 #include "RxPacket.h"
 #include "SignalStop.h" /* g_devourer_should_stop */
 extern "C" {
@@ -444,8 +445,17 @@ void RtlJaguar2Device::ClearAmpduMode() { SetAmpduMode(devourer::AmpduMode{}); }
 
 void RtlJaguar2Device::Init(Action_ParsedRadioPacket packetProcessor,
                             SelectedChannel channel) {
+  /* A window armed before a (re-)bring-up describes a chip state that no
+   * longer exists; leaving it armed would make the next unrelated
+   * GetChannelBusy() take the armed branch and report a stale period. */
+  {
+    std::lock_guard<std::mutex> ccx(busy_window_mutex());
+    busy_window_reset();
+  }
   _channel = channel;
   bring_up(channel);
+  _rx_bw_code.store(channel_width_to_bw_code(channel.ChannelWidth),
+                    std::memory_order_relaxed);
 
   /* DEVOURER_BF_ARM_BFEE=aa:bb:cc:dd:ee:ff — beamforming self-sounding
    * (beamformee side), Jaguar-2 variant. Arms the hardware CSI responder to
@@ -630,7 +640,8 @@ void RtlJaguar2Device::StartRxLoop(Action_ParsedRadioPacket packetProcessor) {
         if (!is_c2h && f.physt && f.drvinfo_size >= 28)
           phy = jaguar2::parse_phy_sts_jgr2(
               data + off + jaguar2::RXDESC_SIZE_8822B, f.drvinfo_size,
-              f.rx_rate <= 3, p.RxAtrib);
+              f.rx_rate <= 3, _rx_bw_code.load(std::memory_order_relaxed),
+              p.RxAtrib);
         /* The RAW descriptor bit, matching the field's meaning on Jaguar1 /
          * Jaguar3 / RTL8733B; `phy` says which fields are safe to fold. */
         p.RxAtrib.physt = f.physt;
@@ -675,12 +686,21 @@ void RtlJaguar2Device::stop_dig() {
 }
 
 void RtlJaguar2Device::InitWrite(SelectedChannel channel) {
+  /* A window armed before a (re-)bring-up describes a chip state that no
+   * longer exists; leaving it armed would make the next unrelated
+   * GetChannelBusy() take the armed branch and report a stale period. */
+  {
+    std::lock_guard<std::mutex> ccx(busy_window_mutex());
+    busy_window_reset();
+  }
   _channel = channel;
   /* TX shares the full cold bring-up (config_trx_mode enables the TX antenna
    * paths, enable_rx sets CR MACTXEN). The chip transmits at its
    * efuse/table-calibrated TXAGC; DEVOURER_TX_PWR=0xNN forces a flat reference
    * (SDR-visibility debug knob). */
   bring_up(channel);
+  _rx_bw_code.store(channel_width_to_bw_code(channel.ChannelWidth),
+                    std::memory_order_relaxed);
   /* DEVOURER_TX_PWR=0xNN forces a flat per-rate TXAGC reference (SDR-visibility
    * debug knob) over the efuse-calibrated level bring_up applied — routed
    * through the runtime flat-override knob so it composes with the offset and
@@ -888,8 +908,16 @@ void RtlJaguar2Device::StopContinuousTx() {
 }
 
 void RtlJaguar2Device::SetMonitorChannel(SelectedChannel channel) {
+  /* A window armed before this retune would integrate across the channel
+   * change and report the blend as one channel's occupancy. */
   /* Serialize against the thermal-track tick's RF-window read. */
   std::lock_guard<std::mutex> lk(_reg_mu);
+  /* The note must not be able to land before a concurrent arm that then
+   * commits while this tune runs. _reg_mu above is what spans the tune, and
+   * with_ccx takes _reg_mu BEFORE this lock, so an arm cannot interleave.
+   * Ordering is always the family's register lock first, then this one. */
+  std::lock_guard<std::mutex> ccx(busy_window_mutex());
+  busy_window_note_retune();
   _channel = channel;
   /* Retune the RF/BB to the new channel. set_channel_bw is a pure tune (RF18 +
    * bandwidth registers) — no per-channel LCK/IQK/TX-power — so it is cheap
@@ -899,6 +927,16 @@ void RtlJaguar2Device::SetMonitorChannel(SelectedChannel channel) {
   _hal.set_channel_bw(static_cast<uint8_t>(channel.Channel),
                       static_cast<uint8_t>(channel.ChannelWidth), _rfe,
                       channel.ChannelOffset);
+  /* Stored after the retune. rxsc 0 is resolved against the width configured
+   * when the frame is PARSED, as the vendor does (phydm_rxsc_2_bw reads the
+   * current dm->band_width): a frame delivered while the retune runs uses the
+   * old width, but one received before the change and delivered after this
+   * store uses the new one. Nothing per-frame could do better — the RX
+   * descriptor and PHY status carry no receive-time bandwidth the vendor
+   * uses (Jaguar2's type1 rf_mode bits only reach a debug print; Jaguar3's
+   * layout comments them out). */
+  _rx_bw_code.store(channel_width_to_bw_code(channel.ChannelWidth),
+                    std::memory_order_relaxed);
   /* Runtime TX-power knobs in use: re-fold them against the NEW channel's
    * efuse group so the offset stays relative to the calibrated table (TXAGC
    * registers are not per-channel — a cross-group move would otherwise keep
@@ -913,9 +951,15 @@ void RtlJaguar2Device::SetMonitorChannel(SelectedChannel channel) {
 
 void RtlJaguar2Device::FastRetune(uint8_t channel, bool cache_rf) {
   if (channel == _channel.Channel)
-    return;
+    return; /* no tune, so nothing to spoil */
   /* Serialize against the thermal-track tick's RF-window read. */
   std::lock_guard<std::mutex> lk(_reg_mu);
+  /* The note must not be able to land before a concurrent arm that then
+   * commits while this tune runs. _reg_mu above is what spans the tune, and
+   * with_ccx takes _reg_mu BEFORE this lock, so an arm cannot interleave.
+   * Ordering is always the family's register lock first, then this one. */
+  std::lock_guard<std::mutex> ccx(busy_window_mutex());
+  busy_window_note_retune();
   const bool band_change = (_channel.Channel <= 14) != (channel <= 14);
   if (_hal.fast_retune(channel, static_cast<uint8_t>(_channel.ChannelWidth),
                        _channel.ChannelOffset, cache_rf)) {
@@ -939,8 +983,18 @@ void RtlJaguar2Device::FastRetune(uint8_t channel, bool cache_rf) {
 void RtlJaguar2Device::FastSetBandwidth(ChannelWidth_t bw) {
   {
     std::lock_guard<std::mutex> lk(_reg_mu);
+    /* A bandwidth change re-clocks the front end, so a window armed before it
+     * was measuring a different receiver — the same argument as a retune. The
+     * note sits inside _reg_mu, which spans the change, and with_ccx takes
+     * _reg_mu first, so an arm cannot interleave. The fall-through to
+     * SetMonitorChannel is deliberately OUTSIDE this scope: it takes both
+     * locks itself. */
+    std::lock_guard<std::mutex> ccx(busy_window_mutex());
+    busy_window_note_retune();
     if (_hal.fast_set_bandwidth(static_cast<uint8_t>(bw))) {
       _channel.ChannelWidth = bw;
+      _rx_bw_code.store(channel_width_to_bw_code(bw),
+                        std::memory_order_relaxed);
       return;
     }
   }
@@ -975,7 +1029,12 @@ RxEnergy RtlJaguar2Device::GetRxEnergy(bool with_nhm) {
   RxEnergy e = _hal.last_energy();
   /* The scalars above are a cached snapshot (no IO); the NHM below is the
    * expensive part, so it is the caller's choice. */
-  if (with_nhm)
+  /* Under the CCX lock together with the note — see the Jaguar1 comment: the
+   * read re-arms the shared engine, so an armed busy window is spoiled by it
+   * and the pair must be atomic against a concurrent arm. */
+  if (with_nhm) {
+    std::lock_guard<std::mutex> ccx(busy_window_mutex());
+    busy_window_note_nhm_read();
     devourer::read_nhm(
       devourer::nhm_regs_11ac(), e.igi,
       [this](uint16_t a) { return _device.rtw_read<uint32_t>(a); },
@@ -983,6 +1042,7 @@ RxEnergy RtlJaguar2Device::GetRxEnergy(bool with_nhm) {
         _device.phy_set_bb_reg(a, m, v);
       },
       e);
+  }
 
   /* DEVOURER_RX_NOISE_FLOOR — active/frame-free absolute floor. The
    * vendor phydm_idle_noise_measure_ac: the BB maintains an idle-time power
@@ -1173,6 +1233,10 @@ devourer::AdapterCaps RtlJaguar2Device::GetAdapterCaps() {
   c.tx_chains = chains;
   c.rx_chains = chains;
   c.per_chain_rssi = chains >= 2;
+  /* CCX CLM via NhmReader's 11AC map; separated arm-vs-quiet on air (#431). */
+  c.busy_airtime_ok = true;
+  c.busy_airtime_measured = true;
+  c.rx_energy_ok = true;
   c.bw_mask = devourer::bw_mask_for_generation(c.generation);
   /* 5/10 MHz baseband re-clock via the 0x8ac small-BW/clock word — both
    * variants, hardware-validated at both widths, both directions and both
@@ -1187,6 +1251,7 @@ devourer::AdapterCaps RtlJaguar2Device::GetAdapterCaps() {
   c.tx_retry_limit_ok = _variant == jaguar2::ChipVariant::C8822B;
   c.hw_rx_timestamp = true;  /* FrameParserJaguar2 fills RxAtrib.tsfl */
   c.hw_beacon_txtsf = true;  /* StartBeacon: MAC inserts the egress TSF into beacons */
+  c.tsf_write_ok = true;     /* WriteTsf: REG_TSFTR (8822B readback) */
   c.xtal_cap_max = 0x3f; /* 6-bit AFE crystal-cap trim (0x24/0x28) */
   c.xtal_cap_default = _hal.efuse_logical_byte(0xB9) == 0xFF
                            ? 0x20
@@ -1291,7 +1356,7 @@ bool RtlJaguar2Device::send_packet(const uint8_t *packet, size_t length) {
                                  0);
   if (build_tx_block(packet, length, usb_frame.data(), 0) == 0)
     return false;
-  int rc = _device.bulk_send_sync_ep(_device.first_bulk_out_ep(),
+  int rc = _device.bulk_send_data_sync_ep(_device.first_bulk_out_ep(),
                                      usb_frame.data(), usb_frame.size(),
                                      /*timeout_ms=*/20);
   /* bulk_send_sync_ep returns BYTES SUBMITTED, so `rc >= 0` would also cover
@@ -1387,7 +1452,7 @@ size_t RtlJaguar2Device::send_packets(const TxPacketView *pkts, size_t count) {
     SET_TX_DESC_DMA_TXAGG_NUM_8822B(first, plan.frames());
     jaguar2::cal_txdesc_chksum_8822b(first);
 
-    const int rc = _device.bulk_send_sync_ep(_device.first_bulk_out_ep(),
+    const int rc = _device.bulk_send_data_sync_ep(_device.first_bulk_out_ep(),
                                              urb.data(), urb.size(),
                                              /*timeout_ms=*/50);
     /* Full write or nothing submitted: a truncated URB means the chip got a
@@ -1951,24 +2016,44 @@ uint64_t RtlJaguar2Device::ReadTsf() {
    * _reg_mu (shared with the coex/thermal tick). NB starved to 0 under a heavy
    * RX bulk-IN flood — reliable from a quiet TX. */
   std::lock_guard<std::mutex> lk(_reg_mu);
-  uint32_t hi = _device.rtw_read<uint32_t>(0x0564);
-  uint32_t lo = _device.rtw_read<uint32_t>(0x0560);
-  if (_device.rtw_read<uint32_t>(0x0564) != hi) {
-    hi = _device.rtw_read<uint32_t>(0x0564);
-    lo = _device.rtw_read<uint32_t>(0x0560);
-  }
-  return (static_cast<uint64_t>(hi) << 32) | lo;
+  return devourer::read_tsftr(_device);
 }
 
-void RtlJaguar2Device::WriteTsf(uint64_t tsf) {
-  /* REG_TSFTR 0x0560 (low) / 0x0564 (high). Serialized on _reg_mu against the
-   * coex/thermal tick. The counter keeps running, so this sets it to ~tsf. */
+bool RtlJaguar2Device::WriteTsf(uint64_t tsf) {
+  /* REG_TSFTR, serialized on _reg_mu against the coex/thermal tick. The
+   * counter keeps running, so this sets it to ~tsf. Readback-measured on the
+   * RTL8822B over USB; the 8821C (USB and the 8821CE's PCIe) rides the same
+   * pair and is not separately measured. Success rule, including the PCIe
+   * readback: devourer::write_tsftr. */
   std::lock_guard<std::mutex> lk(_reg_mu);
-  _device.rtw_write<uint32_t>(0x0560, static_cast<uint32_t>(tsf));
-  _device.rtw_write<uint32_t>(0x0564, static_cast<uint32_t>(tsf >> 32));
+  return devourer::write_tsftr(_device, tsf);
 }
 
 void RtlJaguar2Device::Stop() {
+  /* The armed window dies with the session. Nothing else forgets it:
+   * with_ccx gates on _brought_up, which Stop() does not clear, so a window
+   * armed before a Stop stays visible afterwards and the next retune's note
+   * hands the caller a spoil reason earned by a session that no longer
+   * exists. Measured on an RTL8822BU with this reset removed: an
+   * arm/Stop/retune/read sequence reports spoil=retuned; with it, none.
+   *
+   * Note this Stop does NOT tear the chip down — it only joins the runtime
+   * threads below — so after the reset the sampled path still answers, with
+   * a live 2 ms window. That is why the on-air `revive` arm asserts the spoil
+   * REASON rather than the reading's validity. Scoped; neither joined thread
+   * takes the CCX lock.
+   *
+   * What this does NOT close: no lock spans this Stop(), so a concurrent
+   * ArmChannelBusy can still land after the reset and during teardown, and
+   * with_ccx gates on _brought_up, which nothing here clears — so an arm
+   * issued AFTER a Stop still succeeds against a torn-down chip.
+   * ArmChannelBusy is single-control-thread by contract (IRadio.h); closing
+   * the rest means clearing _brought_up, which gates other paths. The
+   * contract and this residual are both at IRadio::ArmChannelBusy. */
+  {
+    std::lock_guard<std::mutex> ccx(busy_window_mutex());
+    busy_window_reset();
+  }
   stop_pwrtrack();
   stop_dig();
 }

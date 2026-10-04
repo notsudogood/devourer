@@ -2502,6 +2502,8 @@ void HalJaguar2::dig_step() {
   _energy.cca_ofdm = (cca >> 16) & 0xffff;
   _energy.cca_cck = cca & 0xffff;
   _energy.valid_fa = true;
+  _energy.valid_cck = true; /* real reset-then-read CCK counters, see
+                             * RxSense.h::valid_cck */
 
   /* Reset the hold-type FA/CCA counters so the next window is a fresh delta
    * (11AC phydm_reset_bb_hw_cnt path): OFDM-FA 0x9a4[17] (1->0 = reset->enable),

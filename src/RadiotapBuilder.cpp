@@ -1,6 +1,7 @@
 #include "RadiotapBuilder.h"
 
 #include "ieee80211_radiotap.h" /* HE field masks */
+#include "RadiotapTxFlags.h"    /* kRadiotapTxFlagNoAgg */
 
 #include <cctype>
 #include <cstdio>
@@ -22,6 +23,13 @@ constexpr uint32_t kPresentVht      = 1u << 21;
 constexpr uint32_t kPresentHe       = 1u << 23;
 
 constexpr uint16_t kTxFlagsNoAck = 0x0008;
+
+/* TX_FLAGS: always NoAck (broadcast injection), plus the devourer-private
+ * no-aggregation bit when the mode asks for it. */
+uint16_t tx_flags(const TxMode& cfg) {
+  return static_cast<uint16_t>(kTxFlagsNoAck |
+                               (cfg.no_agg ? kRadiotapTxFlagNoAgg : 0));
+}
 
 void emit_u8(std::vector<uint8_t>& v, uint8_t x) { v.push_back(x); }
 void emit_u16_le(std::vector<uint8_t>& v, uint16_t x) {
@@ -46,7 +54,7 @@ std::vector<uint8_t> build_legacy(const TxMode& cfg) {
   emit_u32_le(r, kPresentRate | kPresentTxFlags);         /* it_present */
   emit_u8(r, cfg.legacy_rate_500kbps);                    /* RATE */
   emit_u8(r, 0);                                          /* pad (TX_FLAGS u16 align) */
-  emit_u16_le(r, kTxFlagsNoAck);                          /* TX_FLAGS */
+  emit_u16_le(r, tx_flags(cfg));                          /* TX_FLAGS */
   emit_u8(r, 0);                                          /* trailing pad to 13 */
   return r;
 }
@@ -76,7 +84,7 @@ std::vector<uint8_t> build_ht(const TxMode& cfg) {
   emit_u8(r, 0);
   emit_u16_le(r, 13);
   emit_u32_le(r, kPresentTxFlags | kPresentMcs);
-  emit_u16_le(r, kTxFlagsNoAck);
+  emit_u16_le(r, tx_flags(cfg));
   emit_u8(r, known);
   emit_u8(r, flags);
   emit_u8(r, cfg.ht_mcs <= 31 ? cfg.ht_mcs : 0);
@@ -108,7 +116,7 @@ std::vector<uint8_t> build_vht(const TxMode& cfg) {
   emit_u8(r, 0);
   emit_u16_le(r, 22);
   emit_u32_le(r, kPresentTxFlags | kPresentVht);
-  emit_u16_le(r, kTxFlagsNoAck);
+  emit_u16_le(r, tx_flags(cfg));
   emit_u16_le(r, known);
   emit_u8(r, vht_flags);
   emit_u8(r, bw_code);
@@ -183,7 +191,7 @@ std::vector<uint8_t> build_he(const TxMode& cfg) {
   emit_u8(r, 0);
   emit_u16_le(r, 22);
   emit_u32_le(r, kPresentTxFlags | kPresentHe);
-  emit_u16_le(r, kTxFlagsNoAck);
+  emit_u16_le(r, tx_flags(cfg));
   emit_u16_le(r, data1);
   emit_u16_le(r, data2);
   emit_u16_le(r, data3);

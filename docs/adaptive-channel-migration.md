@@ -125,7 +125,7 @@ records bearing a different hash.
 | FA/CCA deltas | ✓ | ✓ | ✓ | ✓ |
 | IGI (live) | ✓ | ✓ | static hint | ✓ |
 | NHM histogram | ✓ | ✓ | ✓ | ✓ (abs floor 2.4 GHz-only) |
-| Active abs noise floor | 8812A CAL | live | — | — |
+| Active abs noise floor | 8812A CAL | live | NHM idle window (ACS recipe; 5 GHz after a few s settle, 2.4 GHz mostly null) | NHM (8852B) |
 | FastRetune (cached) | 1.6 ms | 0.6–2.5 ms | ~2 ms | ✓ |
 
 On the 8822BU the quiet-channel NHM noise floor sits in bucket ~2, so the

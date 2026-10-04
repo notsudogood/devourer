@@ -117,7 +117,9 @@ struct DeviceConfig {
   struct Rx {
     /* env: DEVOURER_RX_KEEP_CORRUPTED — pass frames that fail the 802.11 FCS
      * (CRC32) or decryption-ICV check up to the host instead of dropping them
-     * at the WMAC filter (sets RCR ACRC32|AICV). Jaguar1 + Jaguar2. */
+     * at the MAC RX filter (Realtek: RCR ACRC32|AICV; MT7612U: its monitor
+     * RX filter). Jaguar1, Jaguar2, Jaguar3, the RTL8733B and the MT7612U;
+     * not ported on Kestrel, where it is silently inert. */
     bool keep_corrupted = false;
     /* env: DEVOURER_TX_WITH_RX — Jaguar3 only: keep the RX filters open and
      * enable the RX path during a TX (InitWrite) bring-up so StartRxLoop can
@@ -176,8 +178,9 @@ struct DeviceConfig {
      * floor (dBm) in GetRxEnergy/GetRxQuality (RxEnergy.abs_noise_floor_dbm).
      * OFF by default: the vendor idle-noise measurement adds ~10 ms of USB
      * round-trips. Jaguar2 measures it live (wedge-free HW idle-noise report);
-     * Jaguar1 8812A/8821A measure it RX-idle (a CAL bracket); Jaguar3 and others
-     * leave it invalid (no vendor path). */
+     * Jaguar1 8812A/8821A measure it RX-idle (a CAL bracket); Jaguar3 and
+     * Kestrel bin idle air in an absolute-threshold NHM window (~2 ms, needs
+     * with_nhm); the RTL8733B leaves it invalid. */
     bool abs_noise_floor = false;
     /* env: DEVOURER_IGI — Jaguar2 fixed initial-gain index override, 7 bits
      * (unset = 0x40, the FA-rate-validated default). */
@@ -200,6 +203,24 @@ struct DeviceConfig {
     /* env: DEVOURER_TX_TIMEOUT_MS — TX bulk-OUT transfer timeout (unset =
      * USB_TIMEOUT). */
     std::optional<unsigned> timeout_ms;
+    /* env: DEVOURER_TX_NO_CANCEL_MULTIPKT=1 — USB: a synchronous data send
+     * (ITransport::tx_sync_data) longer than one bulk packet gets no
+     * timeout; a single-packet one keeps its caller's. libusb cancels on
+     * timeout, and a multi-packet bulk-OUT cancelled after the chip took part
+     * of it leaves the endpoint wedged: with several sender threads queued,
+     * the next transfer streams in as the rest of the half-received packet,
+     * the TXDMA misparses it, and every later bulk-OUT is NAKed until re-init
+     * (observed on an 8822EU with 4 sender threads under a carrier-sense-free
+     * jam: `rc=-7 got 1536/4439`, then nothing). The cost: a frame the chip
+     * NAKs indefinitely blocks its sender indefinitely, and Stop() cannot
+     * interrupt it. Firmware download and reserved-page writes are never
+     * affected. Jaguar2, Jaguar3 and Kestrel data sends only. The RTL8733B
+     * keeps every send bounded: its send path holds the device register lock
+     * across the transfer, so an unbounded one would also stall retunes and
+     * Stop(). Jaguar1 sends asynchronously and the MT7612U has its own TX
+     * path, so both ignore it. Default off: every send uses its finite
+     * timeout. See src/BulkOutTimeout.h. */
+    bool no_cancel_multipkt = false;
     /* env: DEVOURER_TX_LEGACY_8812_DESC — 8814A: keep the legacy 8812-style
      * TX-descriptor bits instead of the 8814-native layout. */
     bool legacy_8812_desc = false;
@@ -526,6 +547,15 @@ struct DeviceConfig {
      * historical copy-on-reap path) when unsupported, so leaving it on is safe.
      * 1 = on (default), 0 = force the heap path. */
     bool rx_zerocopy = true;
+    /* env: DEVOURER_CTRL_BATCH — batch a group of EP0 register accesses
+     * (ITransport::ctrl_batch): submit them back to back and pay one
+     * completion wait per chunk instead of one host round trip per register.
+     * Used by the Jaguar3 channel-scout energy read and the cached FastRetune
+     * hop. Default on; =0 falls the transport back to the synchronous
+     * default (the A/B knob, and the escape hatch on a host whose event pump
+     * misbehaves). The benefit is host-dependent — see
+     * tests/scout_read_bench.cpp before quoting one. */
+    bool ctrl_batch = true;
   } usb;
 
   /* ---- PCIe (DEVOURER_PCIE builds; see src/PcieTransport.h) ------------ */
@@ -552,6 +582,15 @@ struct DeviceConfig {
      * device class both stay free of ambient process state; the demos fold the
      * variable in, the way they do for every other knob in this file. */
     std::optional<std::string> firmware_dir;
+    /* env: DEVOURER_MT7612U_PHY_TICK — 0 disables the backend's 1 Hz PHY tick
+     * (MCU channel calibration + temperature calibration + RX gain tracking,
+     * mt7612u_phy_tick()). Measurement control only: without the tick a
+     * receiver under a fast peer collapses to a few frames per 10 s
+     * (docs/mt7612u.md), so the only reason to turn it off is to measure that
+     * arm - the benchmark that says whether some other periodic reader (a
+     * channel-busy poller, say) is disturbing the tick has no meaning without
+     * the no-tick control beside it. Default on. */
+    bool phy_tick = true;
     /* No adapter selector here on purpose. devourer chooses the adapter before
      * a backend exists (DEVOURER_USB_BUS / _PORT / _VID / _PID) and hands the
      * backend an already-claimed handle, so a MediaTek-specific selector would

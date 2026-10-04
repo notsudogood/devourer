@@ -826,6 +826,11 @@ devourer::AdapterCaps RtlKestrelDevice::GetAdapterCaps() {
   c.tx_chains = 2; /* 8852B/8852C are 2T2R */
   c.rx_chains = 2;
   c.per_chain_rssi = true; /* per-path RSSI from the PPDU-status physts header */
+  /* No CLM: the G6 NHM rides the halbb env-monitor glue, not NhmReader, and
+   * that glue keeps only the noise floor — the vendor engine's clm_ratio is
+   * computed and discarded. No phydm FA/CCA/IGI monitor either. */
+  c.busy_airtime_ok = false;
+  c.rx_energy_ok = false;
   /* Hardware ARQ: SetAckResponder is not implemented on the AX generation
    * (matrix-measured 0% closure) — that flag stays false. The retry knob IS
    * wired (WD DATA_TXCNT_LMT per frame, attempts-semantics folded to the
@@ -1137,7 +1142,7 @@ bool RtlKestrelDevice::send_packet(const uint8_t *packet, size_t length) {
                                               _tx_seq++ & 0xfff, wd_len, txcnt);
   if (is_data && _tx_data_ep)
     ep = _tx_data_ep;
-  int rc = _device.bulk_send_sync_ep(ep, buf.data(),
+  int rc = _device.bulk_send_data_sync_ep(ep, buf.data(),
                                      static_cast<int>(buf.size()), 1000);
   if (rc < 0 || static_cast<size_t>(rc) != buf.size()) {
     _logger->error("Kestrel: send_packet bulk-OUT ep 0x{:02x} failed (rc={}, "

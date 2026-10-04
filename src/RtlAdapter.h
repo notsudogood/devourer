@@ -88,6 +88,27 @@ public:
   /* Pre-power-on HCI programming (rtw88 rtw_hci_setup slot): PCIe TRX ring
    * registers; no-op on USB. Call per bring-up attempt, before power-on. */
   void hci_setup() { _transport->hci_setup(); }
+  /* Pipelined register writes — see ITransport::write_batch_begin. */
+  void write_batch_begin() { _transport->write_batch_begin(); }
+  bool write_batch_end() { return _transport->write_batch_end(); }
+  void flush_writes() { _transport->flush_writes(); }
+  uint64_t ctrl_xfers() const { return _transport->ctrl_xfers(); }
+  /* Batched EP0 register transfers — see ITransport::ctrl_batch for the
+   * ordering / in-place-read / failure contract and the USB event-pump
+   * hazard. The caller owns serialization (its device register lock). */
+  bool ctrl_batch(std::vector<devourer::CtrlOp> &ops) {
+    /* debug.log_writes parity with rtw_write: a batched write is still a
+     * write: keeps tests/decode_wseq.py's golden sequence identical whether
+     * or not a path batches. */
+    if (_log_writes)
+      for (const devourer::CtrlOp &op : ops)
+        if (op.write)
+          devourer::Ev(_logger->events(), "debug.wreg")
+              .hexf("addr", op.addr, 4)
+              .f("width", 4)
+              .hexf("val", (unsigned long long)op.value, 8);
+    return _transport->ctrl_batch(ops);
+  }
 
   /* Kernel-style async RX: keep n_urbs concurrent bulk-IN transfers in flight
    * (USB) or reap the RX buffer-descriptor ring (PCIe), invoking
@@ -138,6 +159,13 @@ public:
   int bulk_send_sync_ep(uint8_t ep, uint8_t *packet, size_t length,
                         int timeout_ms) {
     return _transport->tx_sync(ep, packet, length, timeout_ms);
+  }
+  /* bulk_send_sync_ep for a data frame (ITransport::tx_sync_data): the
+   * send path DeviceConfig::Tx::no_cancel_multipkt applies to. Firmware
+   * download and reserved-page writes stay on bulk_send_sync_ep. */
+  int bulk_send_data_sync_ep(uint8_t ep, uint8_t *packet, size_t length,
+                             int timeout_ms) {
+    return _transport->tx_sync_data(ep, packet, length, timeout_ms);
   }
   void bulk_clear_halt(uint8_t ep) { _transport->clear_halt(ep); }
 

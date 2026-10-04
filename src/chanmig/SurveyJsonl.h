@@ -34,16 +34,19 @@ inline void emit_survey_dwell(EventSink &sink, const SurveyDwell &d) {
       .f("retune_us", (long long)d.retune_us)
       .f("settle_ms", d.settle_ms)
       .f("observe_ms", (long long)d.observe_ms);
+  /* cca_ofdm/fa_ofdm are gated on valid_fa; cca_cck/fa_cck are gated
+   * SEPARATELY on valid_cck (RxSense.h) — a scout-sourced dwell can have a
+   * real OFDM delta with no CCK reset behind it, and that must round-trip
+   * through jsonl as null, not as a fake zero indistinguishable from a
+   * genuinely quiet CCK band. */
   if (d.valid_fa)
-    ev.f("cca_ofdm", d.cca_ofdm)
-        .f("cca_cck", d.cca_cck)
-        .f("fa_ofdm", d.fa_ofdm)
-        .f("fa_cck", d.fa_cck);
+    ev.f("cca_ofdm", d.cca_ofdm).f("fa_ofdm", d.fa_ofdm);
   else
-    ev.f("cca_ofdm", nullptr)
-        .f("cca_cck", nullptr)
-        .f("fa_ofdm", nullptr)
-        .f("fa_cck", nullptr);
+    ev.f("cca_ofdm", nullptr).f("fa_ofdm", nullptr);
+  if (d.valid_cck)
+    ev.f("cca_cck", d.cca_cck).f("fa_cck", d.fa_cck);
+  else
+    ev.f("cca_cck", nullptr).f("fa_cck", nullptr);
   if (d.valid_igi)
     ev.f("igi", d.igi);
   else
@@ -54,11 +57,16 @@ inline void emit_survey_dwell(EventSink &sink, const SurveyDwell &d) {
       hist[i] = d.nhm[i];
     ev.f("nhm_busy", d.nhm_busy_pct)
         .f("nhm_peak", d.nhm_peak)
+        .f("nhm_env", d.nhm_env_pct)
         .f("nhm_dur", d.nhm_dur)
         .arr("nhm", hist, 12);
   } else {
-    ev.f("nhm_busy", nullptr);
+    ev.f("nhm_busy", nullptr).f("nhm_env", nullptr);
   }
+  if (d.valid_clm)
+    ev.f("clm", d.clm_ratio_pct).f("busy_src", d.busy_source);
+  else
+    ev.f("clm", nullptr).f("busy_src", nullptr);
   ev.f("frames", d.frames)
       .f("rssi_mean", d.rssi_mean_raw)
       .f("rssi_max", d.rssi_max_raw)
@@ -82,7 +90,9 @@ inline bool survey_dwell_from_jsonl(std::string_view line, SurveyDwell &d) {
   if (!jsonl_ev_is(line, "survey.dwell"))
     return false;
   long long v = 0;
-  if (!jsonl_int(line, "v", &v) || v != kSurveySchemaV)
+  /* Accept older schemas: every version bump so far has been additive, and a
+   * replay over an archived v1 log is exactly what this parser is for. */
+  if (!jsonl_int(line, "v", &v) || v < 1 || v > kSurveySchemaV)
     return false;
   d = SurveyDwell{};
   std::string chan, err, hex;
@@ -108,10 +118,16 @@ inline bool survey_dwell_from_jsonl(std::string_view line, SurveyDwell &d) {
   if (jsonl_int(line, "cca_ofdm", &x)) {
     d.valid_fa = true;
     d.cca_ofdm = static_cast<uint32_t>(x);
-    if (jsonl_int(line, "cca_cck", &x))
-      d.cca_cck = static_cast<uint32_t>(x);
     if (jsonl_int(line, "fa_ofdm", &x))
       d.fa_ofdm = static_cast<uint32_t>(x);
+  }
+  /* Independent of valid_fa above — see the emit-side comment. An older
+   * line (pre-valid_cck) always wrote cca_cck/fa_cck as real numbers
+   * whenever it wrote cca_ofdm, so this still sets valid_cck correctly for
+   * historical data with no format-version bump needed. */
+  if (jsonl_int(line, "cca_cck", &x)) {
+    d.valid_cck = true;
+    d.cca_cck = static_cast<uint32_t>(x);
     if (jsonl_int(line, "fa_cck", &x))
       d.fa_cck = static_cast<uint32_t>(x);
   }
@@ -124,6 +140,8 @@ inline bool survey_dwell_from_jsonl(std::string_view line, SurveyDwell &d) {
     d.nhm_busy_pct = static_cast<uint8_t>(x);
     if (jsonl_int(line, "nhm_peak", &x))
       d.nhm_peak = static_cast<uint8_t>(x);
+    if (jsonl_int(line, "nhm_env", &x))
+      d.nhm_env_pct = static_cast<uint8_t>(x);
     if (jsonl_int(line, "nhm_dur", &x))
       d.nhm_dur = static_cast<uint16_t>(x);
     int hist[12] = {};
@@ -131,6 +149,12 @@ inline bool survey_dwell_from_jsonl(std::string_view line, SurveyDwell &d) {
     if (jsonl_arr(line, "nhm", hist, 12, &n))
       for (int i = 0; i < n; i++)
         d.nhm[i] = static_cast<uint8_t>(hist[i]);
+  }
+  if (jsonl_int(line, "clm", &x)) {
+    d.valid_clm = true;
+    d.clm_ratio_pct = static_cast<uint8_t>(x);
+    if (jsonl_int(line, "busy_src", &x))
+      d.busy_source = static_cast<uint8_t>(x);
   }
   if (jsonl_int(line, "frames", &x))
     d.frames = static_cast<uint32_t>(x);

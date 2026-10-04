@@ -354,8 +354,10 @@ public:
    * chip's crystal and is latched into every RX descriptor at receive
    * (rx_pkt_attrib::tsfl, the low 32 bits), so it is a precise, host-jitter-free
    * timing reference for multi-radio sync / TDOA / scheduled bursts. Returns 0
-   * where unsupported (default). NB: a register read is a control transfer —
-   * calling it concurrently with a heavy RX bulk-IN load can race (catch the
+   * where unsupported (default, and the RTL8733B). Over USB a failed read
+   * throws std::ios_base::failure on every backend that implements it; a PCIe
+   * register read cannot report failure at all (src/RtlTsf.h). NB: a register read is a control transfer — calling
+   * it concurrently with a heavy RX bulk-IN load can race (catch the
    * exception). */
   virtual uint64_t ReadTsf() { return 0; }
 
@@ -363,12 +365,29 @@ public:
    * — the primitive for TSF *adoption* (a slave slewing its clock onto the
    * master's, so its per-frame `tsfl` reads in the master's timebase). The
    * counter keeps running, so a read-add-write shifts by an approximate delta (a
-   * control loop absorbs the read→write latency). NOTE: this moves the reported
-   * TSF (and the beacon-body timestamp) but NOT the beacon TBTT air-time — a
-   * separate per-port timer drives the TBTT (bench-proven). To steer the
-   * hardware-timed beacon (the uplink timing-advance actuator) use
-   * AdjustBeaconTiming. No-op where unsupported. */
-  virtual void WriteTsf(uint64_t tsf) { (void)tsf; }
+   * control loop absorbs the read→write latency). NOTE: on Jaguar2/3 this moves
+   * the reported TSF (and the beacon-body timestamp) but NOT the beacon TBTT
+   * air-time — a separate per-port timer drives the TBTT (bench-proven). On
+   * Jaguar1 the TBTT is recorded as hardware-locked to the TSF grid
+   * (PinBeaconTbtt, bench on all three dies), so expect a write there to move
+   * an active beacon's TBTT with it; neither that nor whether the beacon keeps
+   * airing without the steer's re-download was measured through this call. To
+   * steer the hardware-timed beacon (the uplink timing-advance actuator) use
+   * AdjustBeaconTiming.
+   *
+   * Two questions, two answers. Whether this part HAS a standalone TSF write is
+   * static: AdapterCaps::tsf_write_ok, resolved at construction — check it once
+   * rather than inferring it from a return value. The return value is per call:
+   * true when the transport accepted the write (backend-specific; the Realtek
+   * rule, including the PCIe readback, is devourer::write_tsftr in
+   * src/RtlTsf.h), false when it did not OR when tsf_write_ok is false (the
+   * default here). So on a tsf_write_ok part, false is a transport failure and
+   * the counter may be half-updated: read back, and retry only while the device
+   * is still present - a device that has gone reports false on every call. True
+   * is not a byte-for-byte proof either: the counter keeps running, so a caller
+   * that needs certainty reads back. Per-backend state and the measured readbacks:
+   * docs/time-distribution.md. */
+  virtual bool WriteTsf(uint64_t tsf) { (void)tsf; return false; }
 
   /* Load a beacon into the beacon reserved-page + enable the MAC beacon function,
    * so the chip AUTO-TRANSMITS it at each TBTT — hardware-timed and
@@ -444,8 +463,8 @@ public:
    * REG_BCN_INTERVAL tweak: runs one beacon interval at (nominal + round(µs/1024))
    * TU then restores nominal, so the next TBTT — and the cadence thereafter —
    * shifts by that many TU. This is the beacon-timing / uplink timing-advance
-   * actuator: WriteTsf moves the reported TSF but NOT the TBTT air-time (a
-   * separate per-port timer drives it), whereas the interval tweak steers it
+   * actuator: on Jaguar2/3 WriteTsf moves the reported TSF but NOT the TBTT
+   * air-time (a separate per-port timer drives it), whereas the interval tweak steers it
    * deterministically (the 802.11 IBSS/TSF-merge mechanism; bench-proven to the
    * microsecond). Requires an active StartBeacon. BLOCKS the caller ~one beacon
    * interval (the tweaked interval must latch and fire once before restore).
@@ -550,6 +569,81 @@ public:
    * reads, so do not poll both on the same cadence. Default is an all-invalid
    * snapshot; each generation overrides. */
   virtual devourer::RxQuality GetRxQuality() { return {}; }
+
+  /* Frame-free channel-occupancy snapshot (see ChannelBusy in RxSense.h) — the
+   * vendor-NEUTRAL half of frame-free sensing, and the only energy evidence
+   * src/chanmig/ and src/hopset/ can ask an arbitrary backend for. Busy
+   * airtime (both silicon families count it in hardware) plus, where the
+   * family has one, the share of energy above the receiver's own floor.
+   *
+   * Delta semantics: the window drains on read. On the Realtek backends this
+   * is IMPLEMENTED BY GetRxEnergy(true), so GetRxEnergy, GetRxQuality and this
+   * all consume the same counters — poll one of the three, not two.
+   *
+   * Cost is NOT symmetric across families: the Realtek path arms a ~2 ms CCX
+   * measurement window and polls a ready bit at 1 ms granularity, while the
+   * MediaTek path is two register reads. A caller written against the cheap
+   * one will stall on the expensive one; this is a dwell-cadence call.
+   *
+   * The Realtek-only phydm detail (false-alarm classes, DIG/IGI, the NHM
+   * histogram) stays on IRtlRadio::GetRxEnergy; this is its portable
+   * reduction. Default is an all-invalid snapshot; a backend with a hardware
+   * busy-airtime counter overrides. Advertised by AdapterCaps::busy_airtime_ok
+   * — do NOT infer support from a successful dynamic_cast to IRtlRadio, which
+   * was never a correct discriminator. */
+  virtual devourer::ChannelBusy GetChannelBusy() { return {}; }
+
+  /* Arm a busy-airtime window of `window_us` and read it later with
+   * GetChannelBusy(), instead of taking whatever window the backend samples
+   * on its own. Returns the window ACTUALLY armed in microseconds (the
+   * hardware's granularity and limits clamp it, so a caller that needs to
+   * know its own denominator reads the return value, not its request);
+   * 0 means this backend cannot arm one and the caller should keep using the
+   * sampled GetChannelBusy() path.
+   *
+   * Why it exists: the sampled path is a ~2 ms hardware window on Realtek,
+   * which is a sample rather than a measurement of the caller's dwell. On a
+   * 50 ms-on/450 ms-off interferer, one such read per 300 ms measured ZERO in
+   * 55 of 71 windows and ~63% in the rest while frames were decoded in nearly
+   * every window; the same load read 8.1-9.5% per second on the MediaTek
+   * timers, which integrate. An armed window makes both families report busy
+   * airtime over the CALLER's window instead of over whatever each backend
+   * samples on its own — not an identical measurement: the Realtek window is
+   * hardware-timed and counts receive-side deferral, the MediaTek one is the
+   * host-measured arm-to-read gap and counts own TX. ChannelBusy::source,
+   * ::window_us and ::own_tx_in_window carry those differences.
+   *
+   * Contract: arm where the caller resets its own counters, read at the end
+   * of the dwell. A window is spoiled by an NHM read (IRtlRadio::GetRxEnergy
+   * with with_nhm, which re-arms the shared CCX engine), by a retune, and by
+   * reading before it has elapsed; the reading then comes back INVALID rather
+   * than plausible-but-wrong.
+   *
+   * A window also does not outlive its hardware session: Stop() forgets it.
+   * Without that a window armed before a teardown stays reachable afterwards
+   * — by different mechanisms on different backends, so clearing whatever
+   * flag guards the engine is not a substitute — and the next retune's note
+   * stamps it Retuned, a reason earned by a session that no longer exists.
+   * Measured on all four Realtek backends. The reading is invalid either
+   * way, so what a missing reset costs is the REASON, which is the whole
+   * point of the spoil field. A backend implementing this owes the reset;
+   * the per-generation guides record how far each teardown goes.
+   *
+   * What the reset does NOT close: it forgets a window armed BEFORE the
+   * teardown. Where nothing clears the flag the engine's own accessor gates
+   * on, an arm issued AFTER Stop() still succeeds against a chip that has
+   * been torn down — true of Jaguar1/2/3, whose gate is never cleared, and
+   * not of the RTL8733B, whose Stop() clears it. Closing it everywhere is a
+   * behaviour change on paths that flag also guards.
+   *
+   * A spoiled or completed window is consumed by
+   * the read; a not-yet-elapsed one stays armed, so the caller reads again
+   * at the end of its dwell instead of re-arming. Single control thread, like
+   * every other control-plane entry point. */
+  virtual uint32_t ArmChannelBusy(uint32_t window_us) {
+    (void)window_us;
+    return 0;
+  }
 
   /* --- Adapter health (see src/AdapterHealth.h; examples/doctor is the
    * reference consumer; the EFUSE probe is on IRtlRadio) --- */
