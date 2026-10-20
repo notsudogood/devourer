@@ -650,8 +650,8 @@ bool RtlKestrelDevice::SetTxPowerRateDiffs(
 }
 
 /* The caller diff (qdB) for one MGN_* rate, or 0 when no table is configured.
- * HE and VHT rates carry no diff by contract — the table describes the CCK,
- * legacy and 1SS-HT ladder only. */
+ * HE rates carry no diff by contract; VHT 1SS takes the HT 1SS ladder's
+ * (rate_diff_qdb_for_rate). */
 int RtlKestrelDevice::rate_diff_qdb_for(uint8_t mgn_rate) const {
   if (!_rate_diffs_on.load(std::memory_order_acquire))
     return 0;

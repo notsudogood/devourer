@@ -55,8 +55,9 @@ shared efuse walk both variants use otherwise.
 A caller table (`SetTxPowerRateDiffs`) replaces either shape via
 `write_txagc_diffs`, anchored on the HT 1SS section index taken **pre-offset
 and pre-rail** — clamping the anchor first would rebuild the shape off a
-saturated base. Resolution is the family's 0.5 dB step. Rows the table does not
-describe (MCS8-15, VHT) are written explicitly AT the anchor rather than left
+saturated base. Resolution is the family's 0.5 dB step. VHT 1SS follows the HT
+1SS diffs (MCS8/9 take MCS7's). Rows the table does not
+describe (MCS8-15, VHT 2SS) are written explicitly AT the anchor rather than left
 alone, because the previous apply left per-section-distinct values there. On an
 unprogrammed EFUSE there is no baseline to anchor on: that path warns loudly
 and leaves TXAGC at the BB-table default rather than silently flattening.

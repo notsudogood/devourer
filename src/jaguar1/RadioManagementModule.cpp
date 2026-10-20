@@ -2486,8 +2486,9 @@ uint8_t RadioManagementModule::ComputeTxPowerIndex(uint8_t path, uint8_t rate,
   } else if (txpwr_diffs_set_) {
     /* Caller table REPLACES the calibrated shape: every rate sits at the
      * MCS7/1SS anchor plus its own diff, quantized to this family's 0.5 dB
-     * step. Rates the table does not describe (MCS8+, VHT, 2SS+) resolve to a
-     * diff of 0 and therefore land on the anchor. */
+     * step. VHT 1SS takes the HT 1SS diffs (MCS8/9 take MCS7's); rates the
+     * table does not describe (HT MCS8+, 2SS+) resolve to a diff of 0 and
+     * therefore land on the anchor. */
     devourer::TxRateDiffsQdb t;
     t.cck = txpwr_diff_qdb_[0].load(std::memory_order_relaxed);
     t.legacy = txpwr_diff_qdb_[1].load(std::memory_order_relaxed);

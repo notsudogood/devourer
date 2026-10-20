@@ -2097,8 +2097,8 @@ void HalJaguar2::write_txagc_diffs(uint16_t path_base, int anchor,
     _device.rtw_write32(static_cast<uint16_t>(path_base + off), v);
   };
   /* Rates outside the caller's set resolve to a diff of 0 in idx_for, so the
-   * anchor rows below need no special-casing — MGN_MCS8 and the VHT rates all
-   * land at the anchor by the same path. */
+   * anchor rows below need no special-casing — MGN_MCS8 and the VHT 2SS rates
+   * land at the anchor by the same path, and VHT 1SS takes the HT 1SS diffs. */
   if (!skip_cck)
     wr4(0x00, MGN_1M, MGN_2M, MGN_5_5M, MGN_11M);
   wr4(0x04, MGN_6M, MGN_9M, MGN_12M, MGN_18M);
@@ -2111,7 +2111,7 @@ void HalJaguar2::write_txagc_diffs(uint16_t path_base, int anchor,
   }
   /* VHT1SS MCS0..9 then VHT2SS MCS0..9; dword 0x34 straddles the two
    * sections (bytes 0-1 = 1SS MCS8/9, 2-3 = 2SS MCS0/1), same layout the
-   * calibrated walk uses. All at the anchor. */
+   * calibrated walk uses. 1SS follows the HT ladder, 2SS sits at the anchor. */
   wr4(0x2c, MGN_VHT1SS_MCS0, MGN_VHT1SS_MCS1, MGN_VHT1SS_MCS2, MGN_VHT1SS_MCS3);
   wr4(0x30, MGN_VHT1SS_MCS4, MGN_VHT1SS_MCS5, MGN_VHT1SS_MCS6, MGN_VHT1SS_MCS7);
   wr4(0x34, MGN_VHT1SS_MCS8, MGN_VHT1SS_MCS9, MGN_VHT2SS_MCS0, MGN_VHT2SS_MCS1);

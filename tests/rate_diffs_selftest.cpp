@@ -34,8 +34,9 @@ int main() {
   CHECK(rate_diff_steps(63, 1) == 63);
   CHECK(rate_diff_steps(7, 0) == 0);   /* unsupported family */
 
-  /* Rate -> field map. Everything the struct does not describe sits at the
-   * anchor, which is a diff of 0. */
+  /* Rate -> field map. VHT 1SS borrows the HT 1SS ladder (MCS8/9 at MCS7's
+   * diff); everything else the struct does not describe sits at the anchor,
+   * which is a diff of 0. */
   using devourer::rate_diff_qdb_for_rate;
   devourer::TxRateDiffsQdb m;
   m.cck = 10;
@@ -53,7 +54,11 @@ int main() {
   CHECK(rate_diff_qdb_for_rate(0x88, m) == 0); /* MCS8  (2SS) */
   CHECK(rate_diff_qdb_for_rate(0x8f, m) == 0); /* MCS15 */
   CHECK(rate_diff_qdb_for_rate(0x90, m) == 0); /* MCS16 (3SS) */
-  CHECK(rate_diff_qdb_for_rate(0xa0, m) == 0); /* VHT1SS_MCS0 */
+  for (int i = 0; i < 8; ++i) /* VHT1SS_MCS0..7 */
+    CHECK(rate_diff_qdb_for_rate(static_cast<uint8_t>(0xa0 + i), m) == i + 1);
+  CHECK(rate_diff_qdb_for_rate(0xa8, m) == 8); /* VHT1SS_MCS8 -> MCS7's */
+  CHECK(rate_diff_qdb_for_rate(0xa9, m) == 8); /* VHT1SS_MCS9 -> MCS7's */
+  CHECK(rate_diff_qdb_for_rate(0xaa, m) == 0); /* VHT2SS_MCS0 */
   CHECK(rate_diff_qdb_for_rate(0xb3, m) == 0); /* VHT2SS_MCS9 */
   CHECK(rate_diff_qdb_for_rate(0x7f, m) == 0); /* MCS32 */
 

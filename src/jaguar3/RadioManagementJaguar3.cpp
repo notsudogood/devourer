@@ -1219,17 +1219,22 @@ void RadioManagementJaguar3::apply_rate_diffs(
    * addr = 0x3a00 + (hw_rate & 0xfc), hw_rate = MRateToHwRate(first rate of
    * the 4-rate group) — same helper/constants as pg_addr_to_rates's callers,
    * so the addressing is byte-identical to the proven pg walk. Rows beyond
-   * the caller-controlled set (HT MCS8..15, all VHT) are written as explicit
+   * the caller-controlled set (HT MCS8..15, VHT 2SS) are written as explicit
    * zero words for deterministic table state, covering the full range the
    * pg walk can touch (0x3a00..0x3a3c) plus the rest of the 32-dword table
    * up to 0x3a7c (matching set_tx_power_ref's zero range). A zero word puts
    * those rows AT the reference: on the 1SS-TX 8822E they are unreachable
    * anyway, but the 2T2R 8822C really can air MCS8..15, and they stay at the
    * reference while MCS0..7 carries the caller's shape — the caller table is
-   * the shape, and it describes the 1SS ladder only. */
+   * the shape, and it describes the 1SS ladder only. VHT 1SS follows that
+   * ladder through rate_diff_qdb_for_rate (MCS0..7 point for point, MCS8/9 at
+   * MCS7's diff), the same mapping every other family's walk uses. */
   struct Row {
     uint8_t first_rate;
     int8_t d0, d1, d2, d3;
+  };
+  auto q = [&d](uint8_t mgn) {
+    return static_cast<int8_t>(devourer::rate_diff_qdb_for_rate(mgn, d));
   };
   const Row rows[] = {
       /* CCK 1/2/5.5/11M:    */ {MGN_1M, d.cck, d.cck, d.cck, d.cck},
@@ -1240,9 +1245,14 @@ void RadioManagementJaguar3::apply_rate_diffs(
       /* HT MCS8..11 (zeroed, 2SS — not in the caller-supplied set): */
       {MGN_MCS8, 0, 0, 0, 0},
       /* HT MCS12..15 (zeroed, 2SS):    */ {MGN_MCS12, 0, 0, 0, 0},
-      /* VHT1SS MCS0..3 (zeroed):       */ {MGN_VHT1SS_MCS0, 0, 0, 0, 0},
-      /* VHT1SS MCS4..7 (zeroed):       */ {MGN_VHT1SS_MCS4, 0, 0, 0, 0},
-      /* VHT1SS MCS8..9+VHT2SS0..1 (zeroed): */ {MGN_VHT1SS_MCS8, 0, 0, 0, 0},
+      /* VHT1SS MCS0..3 (HT diffs):     */
+      {MGN_VHT1SS_MCS0, q(MGN_VHT1SS_MCS0), q(MGN_VHT1SS_MCS1),
+       q(MGN_VHT1SS_MCS2), q(MGN_VHT1SS_MCS3)},
+      /* VHT1SS MCS4..7 (HT diffs):     */
+      {MGN_VHT1SS_MCS4, q(MGN_VHT1SS_MCS4), q(MGN_VHT1SS_MCS5),
+       q(MGN_VHT1SS_MCS6), q(MGN_VHT1SS_MCS7)},
+      /* VHT1SS MCS8..9 (MCS7's diff) + VHT2SS0..1 (zeroed): */
+      {MGN_VHT1SS_MCS8, q(MGN_VHT1SS_MCS8), q(MGN_VHT1SS_MCS9), 0, 0},
       /* VHT2SS MCS2..5 (zeroed):       */ {MGN_VHT2SS_MCS2, 0, 0, 0, 0},
       /* VHT2SS MCS6..9 (zeroed):       */ {MGN_VHT2SS_MCS6, 0, 0, 0, 0},
   };

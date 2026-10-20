@@ -38,7 +38,8 @@ int rate_diff_steps(int qdb, uint8_t step_qdb) {
 int rate_diff_qdb_for_rate(uint8_t mgn_rate, const TxRateDiffsQdb &d) {
   /* MGN_* values from RateDefinitions.h, spelled numerically so this stays a
    * neutral translation unit: CCK 1M/2M/5.5M/11M = 0x02/0x04/0x0b/0x16, the
-   * eight OFDM rates 6M..54M, HT MCS0..7 = 0x80..0x87. */
+   * eight OFDM rates 6M..54M, HT MCS0..7 = 0x80..0x87, VHT 1SS MCS0..9 =
+   * 0xa0..0xa9. */
   switch (mgn_rate) {
   case 0x02:
   case 0x04:
@@ -59,7 +60,14 @@ int rate_diff_qdb_for_rate(uint8_t mgn_rate, const TxRateDiffsQdb &d) {
   }
   if (mgn_rate >= 0x80 && mgn_rate <= 0x87)
     return d.mcs[mgn_rate - 0x80];
-  /* HT MCS8+, all VHT/HE, every 2SS+ stream: no diff, i.e. the anchor. */
+  /* VHT 1SS shares the HT 1SS ladder's modulation and coding point for point
+   * (MCS0..7), so it takes the same diff; MCS8/9 sit above the table's top
+   * and take MCS7's -- never more power than the highest rate it shapes. */
+  if (mgn_rate >= 0xa0 && mgn_rate <= 0xa7)
+    return d.mcs[mgn_rate - 0xa0];
+  if (mgn_rate == 0xa8 || mgn_rate == 0xa9)
+    return d.mcs[7];
+  /* HT MCS8+, HE, every 2SS+ stream: no diff, i.e. the anchor. */
   return 0;
 }
 

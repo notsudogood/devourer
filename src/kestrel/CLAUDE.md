@@ -192,8 +192,9 @@ the frame's own MGN rate to its diff and folds it into the target, so a
 fixed-rate stream writes once and then costs nothing while a rate ladder pays
 the 2-RMW rewrite at each change. There is no calibrated shape underneath, so
 "replace the shape" degenerates to "add to the flat session target". Two
-consequences, neither of them papered over: HE and VHT frames carry no diff (the
-caller struct is the CCK / legacy / 1SS-HT ladder), and the target is global, so
+consequences, neither of them papered over: HE frames carry no diff (the
+caller struct is the CCK / legacy / 1SS-HT ladder; VHT 1SS borrows that ladder's
+diffs), and the target is global, so
 a hardware-timed beacon airing between host frames inherits the last frame's
 rate diff rather than its own rate's. The table is stored as a flat
 `std::atomic<int8_t>[10]` so the TX path reads the one entry it needs without a

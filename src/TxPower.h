@@ -137,8 +137,11 @@ inline int txpkt_pwr_db_for_step(uint8_t step) {
  * clamped to the hardware rail. The `anchor` is the level the chip's own
  * default walk produces for the section reference rate HT MCS7 (1SS, current
  * channel and bandwidth), so a table of zeros is a no-op at MCS7 and flattens
- * every other rate onto MCS7's level. Rates this struct does not describe —
- * HT MCS8+, all VHT/HE, every 2SS+ stream — sit at the anchor.
+ * every other rate onto MCS7's level. VHT 1SS MCS0..7 take the HT MCS0..7
+ * diffs (same modulation and coding point for point) and VHT 1SS MCS8/9 take
+ * MCS7's, so an 80 MHz VHT rung is shaped like the HT ladder rather than
+ * flattened onto the anchor. Rates this struct does not describe — HT MCS8+,
+ * HE, every 2SS+ stream — sit at the anchor.
  *
  * Caller diffs are NOT clamped to the regulatory tables: the same operator's-
  * call permissiveness the offset and flat-override knobs document above.
@@ -175,7 +178,8 @@ uint32_t pack_rate_diff_word(int8_t d0, int8_t d1, int8_t d2, int8_t d3);
 int rate_diff_steps(int qdb, uint8_t step_qdb);
 
 /* The caller diff (qdB) that applies to one MGN_* rate: CCK 1..11M -> .cck,
- * OFDM 6..54M -> .legacy, HT MCS0..7 -> .mcs[n], everything else 0 (the anchor).
+ * OFDM 6..54M -> .legacy, HT MCS0..7 and VHT 1SS MCS0..7 -> .mcs[n], VHT 1SS
+ * MCS8/9 -> .mcs[7], everything else 0 (the anchor).
  * Takes the raw enum value so this header stays free of RateDefinitions.h. */
 int rate_diff_qdb_for_rate(uint8_t mgn_rate, const TxRateDiffsQdb &d);
 
