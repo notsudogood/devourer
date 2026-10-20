@@ -40,9 +40,9 @@ void RadioManagementJaguar3::set_channel_bwmode(uint8_t channel,
    * an 80 MHz-tuned channel carries a 40 MHz frame (send_packet sets the
    * DATA_SC sub-channel) that a standard HT40 receiver decodes — the userspace
    * equivalent of `iw 80MHz` + a 40 MHz radiotap. `channel` is the primary
-   * 20 MHz and must be the LOWEST of the 80 MHz block (e.g. 149 for
-   * 149/153/157/161); the RF tunes the 80 MHz centre (+6 ch = +30 MHz) and the
-   * 40 MHz frame lands on the lower 40 of the block. */
+   * 20 MHz and may be any 20 of the 80 MHz block (e.g. 149/153/157/161); the
+   * RF tunes the block's centre and the BB/MAC carry the primary's slot
+   * (central_and_pri). A 40 MHz frame lands on the 40 holding the primary. */
   const bool is40 = (bwmode == CHANNEL_WIDTH_40);
   const bool is80 = (bwmode == CHANNEL_WIDTH_80);
   uint8_t central, pri;
@@ -468,6 +468,16 @@ void RadioManagementJaguar3::DumpCanary() {
   _logger->info("=== END DEVOURER_DUMP_CANARY ===");
 }
 
+uint8_t RadioManagementJaguar3::vht80_block_lowest(uint8_t channel) {
+  int base = -1;
+  if (channel >= 36 && channel <= 64) base = 36;
+  else if (channel >= 100 && channel <= 144) base = 100;
+  else if (channel >= 149) base = 149;
+  if (base < 0 || (channel - base) % 4 != 0)
+    return channel;
+  return static_cast<uint8_t>(base + ((channel - base) / 16) * 16);
+}
+
 void RadioManagementJaguar3::central_and_pri(uint8_t channel,
                                              uint8_t channel_offset,
                                              ChannelWidth_t bwmode,
@@ -478,12 +488,19 @@ void RadioManagementJaguar3::central_and_pri(uint8_t channel,
     if (channel_offset == 2) { central = channel - 2; pri = 1; } /* HT40- */
     else                     { central = channel + 2; pri = 2; } /* HT40+ */
   } else if (bwmode == CHANNEL_WIDTH_80) {
-    central = static_cast<uint8_t>(channel + 6); /* 80 MHz centre */
-    /* pri-ch index for 80 MHz is a VHT_DATA_SC_* code (get_pri_ch_id), NOT a
-     * plain 0-3 slot: primary = lowest 20 => VHT_DATA_SC_20_LOWEST_OF_80MHZ = 4.
-     * This lands in 0x9b0[15:8]=0x44 and REG_DATA_SC 0x483=0xa4 (kernel-parity;
-     * verified against a register dump of `iw 149 80MHz`). */
-    pri = 4;
+    /* The 80 MHz block holding `channel` (36-48, 52-64, 100-112, 116-128,
+     * 132-144, 149-161, 165-177, then every 16 above) and the primary's slot
+     * in it. pri-ch index for 80 MHz is a VHT_DATA_SC_* code (get_pri_ch_id),
+     * NOT a plain 0-3 slot: lowest 20 => VHT_DATA_SC_20_LOWEST_OF_80MHZ = 4,
+     * then LOWER = 2, UPPER = 1, UPPERST = 3. Lowest lands in 0x9b0[15:8]=0x44
+     * and REG_DATA_SC 0x483=0xa4 (kernel-parity; verified against a register
+     * dump of `iw 149 80MHz`). A channel off the 5 GHz 80 MHz grid keeps the
+     * old meaning (it is the block's lowest: centre +6). */
+    const uint8_t low = vht80_block_lowest(channel);
+    const int pos = (channel - low) / 4;
+    static constexpr uint8_t kSc[4] = {4, 2, 1, 3};
+    central = static_cast<uint8_t>(low + 6); /* 80 MHz centre */
+    pri = kSc[pos & 3];
   }
 }
 
@@ -675,6 +692,17 @@ bool RadioManagementJaguar3::fast_retune(uint8_t channel,
   const bool band_change = cur_2g != (channel <= 14);
   if (channel == _last_channel)
     return true; /* no-op hop */
+  /* A hop that moves the primary's slot inside the bandwidth (an 80 MHz
+   * block's lowest -> its third 20, HT40+ -> HT40-) changes the BB pri-ch
+   * bits and REG_DATA_SC, which this path does not write: decline, the
+   * caller takes the full set. */
+  {
+    uint8_t c0, p0, c1, p1;
+    central_and_pri(_last_channel, channel_offset, bwmode, c0, p0);
+    central_and_pri(channel, channel_offset, bwmode, c1, p1);
+    if (p0 != p1)
+      return false;
+  }
   /* Spur channels (phydm_spur_eliminate_8822e) carry per-channel NBI/CSI-mask
    * state that only the full path programs — a lean hop into OR out of one
    * would leave a stale notch/mask. Decline; the caller falls back to the

@@ -159,6 +159,27 @@ int main() {
     }
   }
 
+  /* Any 20 of an 80 MHz block may be the primary: the RF tunes the block
+   * centre, the BB pri-ch nibbles and REG_DATA_SC carry the slot as the
+   * vendor's VHT_DATA_SC code (lowest 4, lower 2, upper 1, upperst 3; the
+   * 40-in-80 half 10 = lower, 9 = upper). */
+  {
+    using RM = jaguar3::RadioManagementJaguar3;
+    CHECK(RM::vht80_block_lowest(132) == 132 && RM::vht80_block_lowest(144) == 132);
+    CHECK(RM::vht80_block_lowest(48) == 36 && RM::vht80_block_lowest(52) == 52);
+    CHECK(RM::vht80_block_lowest(161) == 149 && RM::vht80_block_lowest(173) == 165);
+    CHECK(RM::vht80_block_lowest(6) == 6 && RM::vht80_block_lowest(70) == 70);
+    struct Slot { uint8_t ch; uint8_t sc20; uint8_t sc40; };
+    for (Slot t : {Slot{132, 4, 10}, Slot{136, 2, 10}, Slot{140, 1, 9}, Slot{144, 3, 9}}) {
+      auto chip = std::make_shared<FakeChip>();
+      RM rm(RtlAdapter(chip, logger, cfg), logger, jaguar3::ChipVariant::C8822E, cfg);
+      rm.set_channel_bwmode(t.ch, 0, CHANNEL_WIDTH_80);
+      CHECK((chip->get(0x3c60, 4) & 0xff) == 138);                 /* RF18 = centre */
+      CHECK(((chip->get(0x9b0, 4) >> 8) & 0xff) == uint32_t(t.sc20 | (t.sc20 << 4)));
+      CHECK(chip->get(0x483, 1) == uint32_t(t.sc20 | (t.sc40 << 4)));
+    }
+  }
+
   if (fails)
     std::fprintf(stderr, "%d failure(s)\n", fails);
   else

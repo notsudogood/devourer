@@ -2562,8 +2562,12 @@ size_t RtlJaguar3Device::build_tx_block(const uint8_t *packet, size_t length,
    * HT40 receiver on the lower-40 channel (the `iw 80MHz` + 40 MHz-radiotap
    * equivalent). */
   uint8_t data_sc = 0;
-  if (_channel.ChannelWidth == CHANNEL_WIDTH_80 && bwidth == CHANNEL_WIDTH_40)
-    data_sc = 10; /* VHT_DATA_SC_40_LOWER_OF_80MHZ */
+  if (_channel.ChannelWidth == CHANNEL_WIDTH_80 && bwidth == CHANNEL_WIDTH_40) {
+    /* The 40 MHz half holding the primary: lower (10) for the block's first
+     * two 20s, upper (9, VHT_DATA_SC_40_UPPER_OF_80MHZ) for the last two. */
+    const uint8_t low = jaguar3::RadioManagementJaguar3::vht80_block_lowest(_channel.Channel);
+    data_sc = (_channel.Channel - low) >= 8 ? 9 : 10;
+  }
 
   /* Group-address (broadcast/multicast) detection: addr1 is the first MAC
    * address in the 802.11 header (after the 2-byte FC + 2-byte duration). Its

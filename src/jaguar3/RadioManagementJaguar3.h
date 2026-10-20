@@ -70,6 +70,11 @@ public:
    * tests/jaguar3_batched_chset_selftest.cpp. */
   bool set_channel_bwmode_batched(uint8_t channel, uint8_t channel_offset,
                                   ChannelWidth_t bwmode);
+  /* The lowest 20 MHz channel of the 5 GHz 80 MHz block holding `channel`
+   * (36, 52, 100, 116, 132, 149, 165, then every 16), or `channel` itself
+   * when it is off that grid (2.4 GHz, 68-96, not a multiple of 4 from the
+   * block start). Any channel of a block may be the 80 MHz primary. */
+  static uint8_t vht80_block_lowest(uint8_t channel);
   /* Transfers the last batched set spent: ops sent in batches, and ops that
    * waited on their own round trip. */
   uint64_t last_batched_ops() const { return _last_batched_ops; }
