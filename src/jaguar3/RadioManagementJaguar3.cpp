@@ -1,9 +1,14 @@
 #include "RadioManagementJaguar3.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdlib>
+#include <iterator>
+#include <memory>
+#include <set>
 #include <utility>
 
+#include "ComposeTransport.h" /* set_channel_bwmode_batched */
 #include "HopProf.h"         /* DEVOURER_HOP_PROF fast-retune stage timing */
 #include "RateDefinitions.h" /* MGN_* rate enum */
 #if defined(DEVOURER_HAVE_JAGUAR3_8822E)
@@ -912,6 +917,65 @@ bool RadioManagementJaguar3::fast_retune(uint8_t channel,
    * compare the fast run's stale full-set dump. */
   if (_cfg.debug.dump_canary)
     DumpCanary();
+  return true;
+}
+
+namespace {
+/* What a 5 GHz set_channel_bwmode reads (both dies, spur and spur-free): the
+ * bandwidth block, RF18/RF 0x1a/RF 0xdf windows, the 3-wire bracket and
+ * force-anapar, AGC tables, band BB, SCO, TX DFIR, MAC BW, the spur/NBI
+ * registers, the BB reset word and IGI. Reads it misses (2.4 GHz, 8822C RXBB
+ * sequence) are learned on first use. */
+constexpr uint16_t kBatchPrimeSeed[] = {
+    0x0810, 0x09b0, 0x09b4, 0x0cbc, 0x088c, 0x1944, 0x4044, 0x1abc, 0x1a00,
+    0x1ae8, 0x1aec, 0x1c90, 0x3c60, 0x4c60, 0x3c68, 0x4c68, 0x3f7c, 0x1830,
+    0x4130, 0x18ac, 0x41ac, 0x0828, 0x1a9c, 0x1a14, 0x1a80, 0x1c80, 0x0c30,
+    0x0808, 0x0668, 0x0818, 0x1d3c, 0x0c0c, 0x1940, 0x4040, 0x0c24, 0x0000,
+    0x1d70};
+/* Reads that must reach the chip every time: the AFE write-confirm loop
+ * (dack_soft_rst_8822e polls 0x3800/0x3900 after writing), the CSI-mask
+ * table port 0x1d94 and its 0x1ee8 access bracket (a table data port's
+ * readback is not the last value written). Writes to them still queue. */
+const std::set<uint16_t> kBatchUncached = {0x3800, 0x3900, 0x382c, 0x392c,
+                                           0x2dd4, 0x1d94, 0x1ee8};
+} // namespace
+
+bool RadioManagementJaguar3::set_channel_bwmode_batched(uint8_t channel,
+                                                        uint8_t channel_offset,
+                                                        ChannelWidth_t bwmode) {
+  if (_batch_prime.empty())
+    _batch_prime.assign(std::begin(kBatchPrimeSeed), std::end(kBatchPrimeSeed));
+  auto ct = std::make_shared<devourer::ComposeTransport>(_device.transport(),
+                                                         kBatchUncached);
+  if (!ct->prime(_batch_prime)) {
+    _logger->warn("Jaguar3: batched channel set: priming read failed -- "
+                  "chip untouched");
+    return false;
+  }
+  const RtlAdapter plain = _device;
+  _device = plain.with_transport(ct);
+  bool threw = false;
+  try {
+    set_channel_bwmode(channel, channel_offset, bwmode);
+  } catch (...) {
+    threw = true;
+  }
+  _device = plain;
+  const bool ok = ct->finish() && !threw;
+  for (uint16_t a : ct->missed_reads())
+    if (std::find(_batch_prime.begin(), _batch_prime.end(), a) == _batch_prime.end())
+      _batch_prime.push_back(a);
+  _last_batched_ops = ct->batched_ops();
+  _last_passthrough_ops = ct->passthrough_ops();
+  if (!ok) {
+    /* A write group failed (or the sequence threw): the chip may hold half a
+     * channel set. Drop the fast caches; the caller resyncs. */
+    invalidate_fast_caches();
+    _last_channel = 0;
+    _logger->warn("Jaguar3: batched channel set to ch {} failed -- resync via "
+                  "the plain path", channel);
+    return false;
+  }
   return true;
 }
 

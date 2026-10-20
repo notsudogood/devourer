@@ -1658,6 +1658,22 @@ void RtlJaguar3Device::SetMonitorChannel(SelectedChannel channel) {
    * radio-management core directly (no lock needed: the coex thread isn't
    * running yet), so locking here cannot self-deadlock. */
   std::lock_guard<std::mutex> lk(_reg_mu);
+  tune_locked(channel, /*batched=*/false);
+}
+
+void RtlJaguar3Device::FastSetChannel(SelectedChannel channel) {
+  _phydm.on_channel_change();
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  tune_locked(channel, /*batched=*/_cfg.tuning.batched_chset);
+}
+
+void RtlJaguar3Device::full_set_locked(uint8_t ch, uint8_t off, ChannelWidth_t bw) {
+  if (_cfg.tuning.batched_chset && _radioManagement.set_channel_bwmode_batched(ch, off, bw))
+    return;
+  _radioManagement.set_channel_bwmode(ch, off, bw);
+}
+
+void RtlJaguar3Device::tune_locked(SelectedChannel channel, bool batched) {
   /* The note must not be able to land before a concurrent arm that then
    * commits while this tune runs. _reg_mu above is what spans the tune, and
    * with_ccx takes _reg_mu BEFORE this lock, so an arm cannot interleave.
@@ -1668,8 +1684,12 @@ void RtlJaguar3Device::SetMonitorChannel(SelectedChannel channel) {
   const bool ch_changed = channel.Channel != _channel.Channel;
   _channel = channel;
   _nhm_busy_ready = false;
-  _radioManagement.set_channel_bwmode(channel.Channel, channel.ChannelOffset,
-                                      channel.ChannelWidth);
+  if (batched)
+    full_set_locked(channel.Channel, channel.ChannelOffset, channel.ChannelWidth);
+  else
+    _radioManagement.set_channel_bwmode(channel.Channel, channel.ChannelOffset,
+                                        channel.ChannelWidth);
+
   /* Stored after the retune. rxsc 0 is resolved against the width configured
    * when the frame is PARSED, as the vendor does (phydm_rxsc_2_bw reads the
    * current dm->band_width): a frame delivered while the retune runs uses the
@@ -1725,8 +1745,7 @@ void RtlJaguar3Device::FastRetune(uint8_t channel, bool cache_rf) {
   /* Fast path declined (band change / never tuned) — full channel set at the
    * current bandwidth + offset, under the same lock (the core is unlocked). */
   _channel.Channel = channel;
-  _radioManagement.set_channel_bwmode(channel, _channel.ChannelOffset,
-                                      _channel.ChannelWidth);
+  full_set_locked(channel, _channel.ChannelOffset, _channel.ChannelWidth);
 }
 
 void RtlJaguar3Device::FastSetBandwidth(ChannelWidth_t bw) {
@@ -1754,8 +1773,7 @@ void RtlJaguar3Device::FastSetBandwidth(ChannelWidth_t bw) {
   }
   /* Fast path declined (40/80 endpoint, cold radio) — full channel set, under
    * the same lock (the core is unlocked). */
-  _radioManagement.set_channel_bwmode(_channel.Channel, _channel.ChannelOffset,
-                                      bw);
+  full_set_locked(_channel.Channel, _channel.ChannelOffset, bw);
   _channel.ChannelWidth = bw;
   _rx_bw_code.store(channel_width_to_bw_code(bw), std::memory_order_relaxed);
 }

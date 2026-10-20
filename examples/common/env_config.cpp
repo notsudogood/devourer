@@ -187,6 +187,9 @@ devourer::DeviceConfig devourer_config_from_env() {
   cfg.tuning.disable_cca = env_flag("DEVOURER_DIS_CCA");
   if (env_long("DEVOURER_FASTRETUNE_FW", &v) && v >= 0)
     cfg.tuning.fastretune_fw = static_cast<int>(v);
+  /* Default-on knob: unset = batched; only "0" restores the plain path. */
+  if (const char *e = env_str("DEVOURER_BATCHED_CHSET"))
+    cfg.tuning.batched_chset = std::strcmp(e, "0") != 0;
   if (env_long("DEVOURER_KFR_OFLD", &v) && v >= 0)
     cfg.tuning.kestrel_fastretune_ofld = static_cast<int>(v);
   if (env_long("DEVOURER_FW_TABLE_OFLD", &v) && v >= 0)

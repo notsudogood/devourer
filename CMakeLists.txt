@@ -1287,6 +1287,16 @@ if(DEVOURER_JAGUAR3)
     add_test(NAME scout_batch_fail COMMAND ScoutBatchFailSelftest)
 endif()
 
+# Headless guard: the batched Jaguar3 channel set (src/ComposeTransport.h +
+# RadioManagementJaguar3::set_channel_bwmode_batched) puts exactly the plain
+# set_channel_bwmode's write sequence on the bus, for width switches, spur
+# hops and primary moves, on both dies -- at a fraction of the round trips.
+if(DEVOURER_JAGUAR3)
+    add_executable(Jaguar3BatchedChsetSelftest tests/jaguar3_batched_chset_selftest.cpp)
+    target_link_libraries(Jaguar3BatchedChsetSelftest PRIVATE devourer)
+    add_test(NAME jaguar3_batched_chset COMMAND Jaguar3BatchedChsetSelftest)
+endif()
+
 # Headless guard for the adapter-health classifier + EFUSE-stability probe
 # loop (src/AdapterHealth.h) — the verdict mapping behind examples/doctor,
 # with cases encoding the verdicts measured on a real dying unit vs its

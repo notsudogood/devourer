@@ -367,6 +367,14 @@ struct DeviceConfig {
      * bring-up band's — active power knobs re-fold). Bench + protocol:
      * docs/experiments/kernel-channel-switch-offload.md. */
     int fastretune_fw = 0;
+    /* env: DEVOURER_BATCHED_CHSET — Jaguar3 (8822C/8822E): run the full
+     * channel set behind IRadio::FastSetChannel, FastSetBandwidth's 40/80 MHz
+     * endpoints and FastRetune's declined hops (spur channels, never tuned,
+     * band change) as composed, batched register transfers
+     * (RadioManagementJaguar3::set_channel_bwmode_batched) instead of one
+     * blocking read-modify-write per field. Default ON; "0" restores the
+     * plain path. SetMonitorChannel is always plain. */
+    bool batched_chset = true;
     /* env: DEVOURER_KFR_OFLD — Kestrel FastRetune firmware IO-offload (mac_ax
      * fwofld.c): batch the whole same-sub-band hop (RF18/0xcf channel set + BB
      * reset + fixed TX power) into ONE FW_OFLD/CMD_OFLD_REG H2C the on-chip fw

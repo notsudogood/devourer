@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <utility>
 #include <optional>
 
 #ifdef _WIN32
@@ -85,6 +86,15 @@ public:
              Logger_t logger, const devourer::DeviceConfig &cfg = {});
 
   bool is_usb() const { return _transport->is_usb(); }
+  /* The transport this adapter forwards to, and a copy of this adapter
+   * (every mirrored field kept) forwarding to another one -- the seam a
+   * register sequence uses to run over a devourer::ComposeTransport. */
+  std::shared_ptr<devourer::ITransport> transport() const { return _transport; }
+  RtlAdapter with_transport(std::shared_ptr<devourer::ITransport> t) const {
+    RtlAdapter copy = *this;
+    copy._transport = std::move(t);
+    return copy;
+  }
   /* Pre-power-on HCI programming (rtw88 rtw_hci_setup slot): PCIe TRX ring
    * registers; no-op on USB. Call per bring-up attempt, before power-on. */
   void hci_setup() { _transport->hci_setup(); }

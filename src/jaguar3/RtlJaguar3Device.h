@@ -64,6 +64,10 @@ public:
    * sanctioned in-session hop primitive (unlike a bare SetMonitorChannel). */
   void FastRetune(uint8_t channel, bool cache_rf) override;
   void FastSetBandwidth(ChannelWidth_t bw) override;
+  /* IRadio::FastSetChannel: SetMonitorChannel's work with the channel set
+   * batched (set_channel_bwmode_batched), the plain set as the resync when a
+   * batch fails. tuning.batched_chset = false makes it SetMonitorChannel. */
+  void FastSetChannel(SelectedChannel channel) override;
   void InitWrite(SelectedChannel channel) override;
   bool send_packet(const uint8_t *packet, size_t length) override;
   /* Batch TX with USB aggregation (IRadio contract): with
@@ -312,6 +316,13 @@ private:
 
   RtlAdapter _device;
   const devourer::DeviceConfig _cfg;
+  /* SetMonitorChannel / FastSetChannel body, _reg_mu held: the channel set
+   * (batched when asked and enabled, plain otherwise or as the resync) plus
+   * the sticky-knob re-asserts. */
+  void tune_locked(SelectedChannel channel, bool batched);
+  /* The full channel set at (ch, off, bw), batched when enabled, plain as
+   * the fallback. _reg_mu held. */
+  void full_set_locked(uint8_t ch, uint8_t off, ChannelWidth_t bw);
   Logger_t _logger;
   jaguar3::ChipVariant _variant;
   int _xtal_cap = -1; /* current crystal-cap code (SetXtalCap) */

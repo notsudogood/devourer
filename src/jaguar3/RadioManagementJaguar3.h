@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <vector>
 
 #include "logger.h"
 #include "RtlAdapter.h"
@@ -51,6 +52,28 @@ public:
    * the full set_channel_bwmode. */
   bool fast_retune(uint8_t channel, uint8_t channel_offset,
                    ChannelWidth_t bwmode, bool cache_rf);
+
+  /* The full set_channel_bwmode, unchanged, run over a
+   * devourer::ComposeTransport: its register reads come from one batched read
+   * of the registers it touches (learned across calls), and its writes go out
+   * as composed dwords in ctrl_batch groups -- the same write sequence as the
+   * plain path, without a blocking round trip per field. What makes a width
+   * switch (20/40/80 at the same primary), a hop into or out of an 8822E spur
+   * channel and an 80 MHz primary change fast enough to do between frames:
+   * every one of those needs the full path's register work (bandwidth block,
+   * RF18 + RXBB, AGC/SCO/DFIR, MAC BW/TXSC, spur notch, BB reset, IGI toggle,
+   * DAC FIFO reset), and the plain path pays ~65-91 ms in round trips for it
+   * on an RK3566 host (mabur bw40 sweep 2026-09-23). Returns false when the
+   * priming read or a write batch failed; after a failed write batch the chip
+   * may be half-configured, so the caller resyncs with the plain
+   * set_channel_bwmode. Parity with the plain path is pinned in
+   * tests/jaguar3_batched_chset_selftest.cpp. */
+  bool set_channel_bwmode_batched(uint8_t channel, uint8_t channel_offset,
+                                  ChannelWidth_t bwmode);
+  /* Transfers the last batched set spent: ops sent in batches, and ops that
+   * waited on their own round trip. */
+  uint64_t last_batched_ops() const { return _last_batched_ops; }
+  uint64_t last_passthrough_ops() const { return _last_passthrough_ops; }
 
   /* Firmware fast-path enabler (H2C 0x1D SINGLE_CHANNELSWITCH_V2 — protocol
    * + bench: docs/experiments/kernel-channel-switch-offload.md). The sender is injected
@@ -228,6 +251,11 @@ private:
    * in RF 0x1a), and the fast path must end in the same state as the full
    * path, which re-imposes it on every retune. */
   bool _rxbb_asserted = false;
+
+  /* set_channel_bwmode_batched: the registers its priming read fetches --
+   * seeded with the 5 GHz channel set's, grown by every read that missed. */
+  std::vector<uint16_t> _batch_prime;
+  uint64_t _last_batched_ops = 0, _last_passthrough_ops = 0;
 };
 
 } /* namespace jaguar3 */

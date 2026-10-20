@@ -48,6 +48,32 @@ narrowband dividers, RF18 encoding), strategy interfaces `Jaguar3Calibration`
   mask: the NHM th[8..10] writes were
   double-shifted (read back 0) until the selftest pinned them.
 
+## Batched channel set (FastSetChannel, width switches, spur hops)
+
+`RadioManagementJaguar3::set_channel_bwmode_batched` runs the plain
+`set_channel_bwmode` unchanged over a `devourer::ComposeTransport`
+(`src/ComposeTransport.h`): one batched priming read of the registers it
+touches (seeded, then learned from misses), writes queued as composed dwords
+in `ctrl_batch` groups, and every 8/16-bit access or unprimed read flushing
+first so order is the plain path's. Reads that must reach the chip -- the
+DAC write-confirm loop (0x3800/0x3900) and the CSI-mask table port
+(0x1d94/0x1ee8) -- are never served from the cache. It backs
+`IRadio::FastSetChannel`, `FastSetBandwidth`'s 40/80 endpoints and
+`FastRetune`'s declined hops (spur channels), gated by
+`tuning.batched_chset` (default on, `DEVOURER_BATCHED_CHSET=0` = plain);
+`SetMonitorChannel` stays plain. A failed batch drops the fast caches and
+resyncs through the plain set.
+
+`tests/jaguar3_batched_chset_selftest.cpp` pins that the write SEQUENCE is
+the plain path's (addresses, values, widths, order) for width switches,
+hops into and out of spur channels and primary moves, on both dies, against
+a fake chip whose registers read back their last write. Round trips on that
+fake: 8822E ~60 vs ~190 spur-free, ~90 vs ~215 on a spur channel (the
+uncached reads are the remainder); 8822C ~7 vs ~90. Unmeasured on hardware:
+the wall-clock time, and whether any cached register's readback differs
+from its last write on real silicon (the risk the uncached set covers for
+the known ports).
+
 ## Bring-up cost and the pipelined register writes
 
 `InitWrite` is ~14k USB control transfers and nothing else (stage timing:

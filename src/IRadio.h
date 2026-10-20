@@ -98,6 +98,17 @@ public:
     SetMonitorChannel(c);
   }
 
+  /* A channel + width + offset change that does the full channel set's
+   * register work -- a width switch between 20/40/80 at the same primary, a
+   * hop into or out of a channel whose per-channel state FastRetune cannot
+   * carry (8822E spur channels), an 80 MHz primary move -- issued as batched
+   * transfers instead of a blocking round trip per field, so it is cheap
+   * enough to do between frames. Nothing the full path writes is skipped:
+   * the write sequence is the same, only the transport is batched. Not for
+   * bring-up. The default is SetMonitorChannel (not ported); Jaguar3
+   * overrides it (DeviceConfig::Tuning::batched_chset). */
+  virtual void FastSetChannel(SelectedChannel channel) { SetMonitorChannel(channel); }
+
   /* Force a flat absolute TXAGC index across all rates (the debug /
    * SDR-visibility knob — same knob as SetTxPowerIndexOverride, kept for
    * source compatibility; the override form has the explicit clear). NB this
