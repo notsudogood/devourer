@@ -2,7 +2,8 @@
  * EXACTLY the plain set_channel_bwmode's write sequence on the bus -- same
  * addresses, same values, same widths, same order -- and leave the same
  * register state, for every move it is used for (a width switch 20/40/80 at
- * one primary, a hop into and out of an 8822E spur channel, a primary move),
+ * one primary, 20 <-> 10 MHz narrowband, a hop into and out of an 8822E spur
+ * channel, a primary move),
  * on both dies.
  *
  * Two identical fake chips run the same steps; chip A takes every step on the
@@ -108,6 +109,8 @@ int main() {
   const std::vector<Step> steps = {
       {132, 1, CHANNEL_WIDTH_40, "132 80->40 (width down)"},
       {132, 0, CHANNEL_WIDTH_20, "132 40->20"},
+      {132, 0, CHANNEL_WIDTH_10, "132 20->10 (narrowband)"},
+      {132, 0, CHANNEL_WIDTH_20, "132 10->20"},
       {132, 1, CHANNEL_WIDTH_40, "132 20->40"},
       {132, 0, CHANNEL_WIDTH_80, "132 40->80 (width up)"},
       {36, 0, CHANNEL_WIDTH_80, "hop 132->36 at 80"},
@@ -116,6 +119,8 @@ int main() {
       {153, 0, CHANNEL_WIDTH_20, "spur 153/20"},
       {132, 0, CHANNEL_WIDTH_80, "out of spur back to 132/80"},
       {140, 1, CHANNEL_WIDTH_40, "140+144"},
+      {140, 0, CHANNEL_WIDTH_10, "140 40->10 (narrowband)"},
+      {140, 1, CHANNEL_WIDTH_40, "140 10->40"},
   };
 
   for (auto variant : {jaguar3::ChipVariant::C8822E, jaguar3::ChipVariant::C8822C}) {
