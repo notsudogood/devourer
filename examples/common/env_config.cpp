@@ -190,6 +190,10 @@ devourer::DeviceConfig devourer_config_from_env() {
   /* Default-on knob: unset = batched; only "0" restores the plain path. */
   if (const char *e = env_str("DEVOURER_BATCHED_CHSET"))
     cfg.tuning.batched_chset = std::strcmp(e, "0") != 0;
+  if (const char *e = env_str("DEVOURER_LEAN_WIDTH"))
+    cfg.tuning.lean_width = std::strcmp(e, "1") == 0;
+  if (const char *e = env_str("DEVOURER_LEAN_VERIFY"))
+    cfg.tuning.lean_verify = std::strcmp(e, "0") != 0;
   if (env_long("DEVOURER_KFR_OFLD", &v) && v >= 0)
     cfg.tuning.kestrel_fastretune_ofld = static_cast<int>(v);
   if (env_long("DEVOURER_FW_TABLE_OFLD", &v) && v >= 0)

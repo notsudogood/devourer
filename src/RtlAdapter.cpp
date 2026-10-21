@@ -259,15 +259,21 @@ void RtlAdapter::phy_set_bb_reg(uint16_t regAddr, uint32_t bitMask,
 void RtlAdapter::PHY_SetBBReg8812(uint16_t regAddr, uint32_t bitMask,
                                   uint32_t dataOriginal) {
   uint32_t data = dataOriginal;
+  uint32_t field = dataOriginal; /* the bits this write sets, in place */
   if (bitMask != bMaskDWord) {
     /* if not "double word" write */
     auto OriginalValue = rtw_read32(regAddr);
     auto BitShift = PHY_CalculateBitShift(bitMask);
-    data = ((OriginalValue) & (~bitMask)) |
-           (((dataOriginal << (int)BitShift)) & bitMask);
+    field = (dataOriginal << (int)BitShift) & bitMask;
+    data = ((OriginalValue) & (~bitMask)) | field;
   }
 
+  if (_field_log) {
+    _field_log->push_back(RegFieldWrite{regAddr, 4, bitMask, field});
+    _in_field_write = true;
+  }
   rtw_write32(regAddr, data);
+  _in_field_write = false;
 
   /* RTW_INFO("BBW MASK=0x%x Addr[0x%x]=0x%x\n", BitMask, RegAddr, Data); */
 }

@@ -2,6 +2,7 @@
 #define RTL_JAGUAR3_DEVICE_H
 
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <optional>
 #include <thread>
@@ -209,6 +210,7 @@ public:
   bool ArmNhmBusy(uint16_t period_4us) override;
   NhmBusy ReadNhmBusy() override;
   int ReadTunedCentral() override;
+  devourer::ChannelSetStats LastChannelSetStats() override;
 
   /* Bench/debug-only raw BB register peek (tests/scout_read_bench.cpp's
    * on-hardware verification that GetRxEnergyScout's composed reset
@@ -319,7 +321,15 @@ private:
   /* SetMonitorChannel / FastSetChannel body, _reg_mu held: the channel set
    * (batched when asked and enabled, plain otherwise or as the resync) plus
    * the sticky-knob re-asserts. */
-  void tune_locked(SelectedChannel channel, bool batched);
+  void tune_locked(SelectedChannel channel, bool batched, bool lean = false);
+  /* IRtlRadio::LastChannelSetStats, written at the end of every
+   * SetMonitorChannel / FastSetChannel. */
+  devourer::ChannelSetStats _last_set_stats;
+  mutable std::mutex _set_stats_mu;
+  uint32_t _post_us = 0; /* tune_locked's re-asserts after the set; _reg_mu */
+  void finish_set_stats_(std::chrono::steady_clock::time_point t0,
+                         std::chrono::steady_clock::time_point t_locked, uint64_t xfers0,
+                         devourer::ChannelSetStats::Path plain_path);
   /* The full channel set at (ch, off, bw), batched when enabled, plain as
    * the fallback. _reg_mu held. */
   void full_set_locked(uint8_t ch, uint8_t off, ChannelWidth_t bw);

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdlib>
+#include <functional>
 #include <iterator>
 #include <memory>
 #include <set>
@@ -68,6 +69,9 @@ void RadioManagementJaguar3::set_channel_bwmode(uint8_t channel,
   }
 
   _last_channel = channel;
+  _last_off = channel_offset;
+  _last_bw = bwmode;
+  _lean_cur_valid = true;
 
   /* --- bandwidth block (config_phydm_switch_bandwidth_8822c CH_20 / CH_40).
    * The 0x810/0x9b0[7:6]/0x9b4 clock+DFIR writes are the same for 20 and 40 MHz
@@ -742,6 +746,7 @@ bool RadioManagementJaguar3::fast_retune(uint8_t channel,
     prof.mark("fw");
     _fw_sw_pending = central;
     _cw_primed = false; /* the fw rewrites RF18 under the compose cache */
+    _lean_cur_valid = false; /* moved without a full set */
     if (band_change) {
       _last_sco = 0xffffffff;
       _last_dfir = 0xffffffff;
@@ -938,6 +943,7 @@ bool RadioManagementJaguar3::fast_retune(uint8_t channel,
   prof.mark("bbrst");
 
   _last_channel = channel;
+  _lean_cur_valid = false; /* moved without a full set */
   DVR_DEBUG(_logger, "Jaguar3: fast retune -> ch {} (central {}, RF18=0x{:05x})",
                  channel, central, rf18);
   /* The J1 parity lesson: the fast path must emit the canary itself — it does
@@ -975,13 +981,17 @@ bool RadioManagementJaguar3::set_channel_bwmode_batched(uint8_t channel,
     _batch_prime.assign(std::begin(kBatchPrimeSeed), std::end(kBatchPrimeSeed));
   auto ct = std::make_shared<devourer::ComposeTransport>(_device.transport(),
                                                          kBatchUncached);
+  _stats = devourer::ChannelSetStats{};
+  _stats.path = devourer::ChannelSetStats::Path::Batched;
   if (!ct->prime(_batch_prime)) {
     _logger->warn("Jaguar3: batched channel set: priming read failed -- "
                   "chip untouched");
     return false;
   }
+  std::vector<RegFieldWrite> fields;
+  const uint32_t loops0 = _dack_loops;
   const RtlAdapter plain = _device;
-  _device = plain.with_transport(ct);
+  _device = plain.with_transport(ct).with_field_log(&fields);
   bool threw = false;
   try {
     set_channel_bwmode(channel, channel_offset, bwmode);
@@ -990,6 +1000,16 @@ bool RadioManagementJaguar3::set_channel_bwmode_batched(uint8_t channel,
   }
   _device = plain;
   const bool ok = ct->finish() && !threw;
+  _stats.prime_us = static_cast<uint32_t>(ct->prime_us());
+  _stats.flush_us = static_cast<uint32_t>(ct->flush_us());
+  _stats.flushes = static_cast<uint32_t>(ct->flushes());
+  _stats.batched_writes = static_cast<uint32_t>(ct->batched_ops());
+  _stats.sync_us = static_cast<uint32_t>(ct->passthrough_us());
+  _stats.sync_ops = static_cast<uint32_t>(ct->passthrough_ops());
+  _stats.dack_loops = _dack_loops - loops0;
+  if (ok && (bwmode == CHANNEL_WIDTH_20 || bwmode == CHANNEL_WIDTH_40 ||
+             bwmode == CHANNEL_WIDTH_80))
+    _learned[learn_key(channel, channel_offset, bwmode)] = Learned{std::move(fields)};
   for (uint16_t a : ct->missed_reads())
     if (std::find(_batch_prime.begin(), _batch_prime.end(), a) == _batch_prime.end())
       _batch_prime.push_back(a);
@@ -1004,6 +1024,214 @@ bool RadioManagementJaguar3::set_channel_bwmode_batched(uint8_t channel,
                   "the plain path", channel);
     return false;
   }
+  return true;
+}
+
+bool RadioManagementJaguar3::set_width_lean(uint8_t channel, uint8_t channel_offset,
+                                            ChannelWidth_t bwmode, bool verify) {
+  _stats = devourer::ChannelSetStats{};
+  _stats.path = devourer::ChannelSetStats::Path::Lean;
+  auto decline = [&](const char *why) {
+    _stats.lean_skip = why;
+    return false;
+  };
+  auto plain_width = [](ChannelWidth_t w) {
+    return w == CHANNEL_WIDTH_20 || w == CHANNEL_WIDTH_40 || w == CHANNEL_WIDTH_80;
+  };
+  if (!plain_width(bwmode) || !plain_width(_last_bw))
+    return decline("not a 20/40/80 switch");
+  if (channel != _last_channel || !_lean_cur_valid)
+    return decline("no full set on this channel since the last move");
+  const auto ia = _learned.find(learn_key(_last_channel, _last_off, _last_bw));
+  const auto ib = _learned.find(learn_key(channel, channel_offset, bwmode));
+  if (ia == _learned.end() || ib == _learned.end())
+    return decline("width not learned yet");
+  const std::vector<RegFieldWrite> &A = ia->second.fields, &B = ib->second.fields;
+
+  /* Per register (address + access width): the bits each state's full set
+   * writes (m) and their final values (v), whether any bit is written twice
+   * with different values within B (a bracket or gate, e.g. 0x1c90 around
+   * the RF writes), and B's write sequence. */
+  struct Reg {
+    uint32_t m = 0, v = 0;
+    bool toggles = false;
+    std::vector<const RegFieldWrite *> seq;
+  };
+  using Key = std::pair<uint16_t, uint8_t>;
+  auto fold = [](const std::vector<RegFieldWrite> &L, bool &opaque) {
+    std::map<Key, Reg> regs;
+    for (const RegFieldWrite &w : L) {
+      if (w.width == 0) {
+        opaque = true;
+        continue;
+      }
+      Reg &r = regs[Key{w.addr, w.width}];
+      if (((r.v ^ w.value) & (r.m & w.mask)) != 0)
+        r.toggles = true;
+      r.v = (r.v & ~w.mask) | (w.value & w.mask);
+      r.m |= w.mask;
+      r.seq.push_back(&w);
+    }
+    return regs;
+  };
+  bool opaque = false;
+  const auto ra = fold(A, opaque), rb = fold(B, opaque);
+  if (opaque)
+    return decline("a bulk write in the full set");
+  /* The tail the lean path runs itself (BB reset, IGI toggle, the DAC FIFO
+   * reset and its write-confirm loop), and the CSI-mask table port, whose
+   * writes are a sequence, not a state. Both widths' spur paths clean every
+   * tone any spur case sets before setting their own, so where the two
+   * sequences differ (a spur channel whose case changes with the width),
+   * replaying B's whole sequence leaves the table as B's full set does. */
+  static const std::set<uint16_t> kExplicit = {0x0000, 0x1d70, 0x3800, 0x3900,
+                                               0x382c, 0x392c, 0x2dd4};
+  static const std::set<uint16_t> kTable = {0x1d94, 0x1ee8};
+  auto seq_values = [](const std::map<Key, Reg> &regs, uint16_t a) {
+    std::vector<std::pair<uint32_t, uint32_t>> out;
+    for (const auto &kv : regs)
+      if (kv.first.first == a)
+        for (const RegFieldWrite *w : kv.second.seq)
+          out.emplace_back(w->mask, w->value);
+    return out;
+  };
+  bool table_differs = false;
+  for (uint16_t t : kTable)
+    table_differs = table_differs || seq_values(ra, t) != seq_values(rb, t);
+
+  struct Op {
+    RegFieldWrite w; /* width 4: masked RMW; 1/2: plain write */
+    bool check;
+  };
+  std::vector<Op> plan;
+  std::vector<uint16_t> prime = {0x0000, 0x1d70};
+  std::map<Key, size_t> last_pos;
+  for (size_t i = 0; i < B.size(); ++i)
+    last_pos[Key{B[i].addr, B[i].width}] = i;
+  for (size_t i = 0; i < B.size(); ++i) {
+    const RegFieldWrite &w = B[i];
+    if (kExplicit.count(w.addr))
+      continue;
+    if (kTable.count(w.addr)) {
+      if (table_differs)
+        plan.push_back(Op{w, false});
+      continue;
+    }
+    const Key k{w.addr, w.width};
+    const Reg &b = rb.at(k);
+    const auto ita = ra.find(k);
+    if (w.width != 4) {
+      /* A byte/halfword MAC write: replay B's writes where its sequence
+       * differs from A's, at the native width (a dword RMW would rewrite
+       * the neighbouring bytes). */
+      bool same = ita != ra.end() && ita->second.seq.size() == b.seq.size();
+      for (size_t j = 0; same && j < b.seq.size(); ++j)
+        same = ita->second.seq[j]->value == b.seq[j]->value;
+      if (!same)
+        plan.push_back(Op{w, false});
+      continue;
+    }
+    if (b.toggles) {
+      plan.push_back(Op{w, false});
+      if (std::find(prime.begin(), prime.end(), w.addr) == prime.end())
+        prime.push_back(w.addr);
+      continue;
+    }
+    if (last_pos[k] != i)
+      continue; /* a register set once: written at its last position */
+    /* Bits B's full set writes that A's state does not already hold. Bits
+     * outside b.m the full set leaves alone, and so does this. */
+    const uint32_t settled = ita == ra.end() ? 0u : (ita->second.m & b.m & ~(ita->second.v ^ b.v));
+    const uint32_t need = b.m & ~settled;
+    if (need == 0)
+      continue;
+    plan.push_back(Op{RegFieldWrite{w.addr, 4, need, b.v & need}, true});
+    if (std::find(prime.begin(), prime.end(), w.addr) == prime.end())
+      prime.push_back(w.addr);
+  }
+
+  invalidate_fast_caches();
+  auto ct = std::make_shared<devourer::ComposeTransport>(_device.transport(), kBatchUncached);
+  if (!ct->prime(prime))
+    return decline("priming read failed");
+  const uint32_t loops0 = _dack_loops;
+  const RtlAdapter plain = _device;
+  _device = plain.with_transport(ct);
+  bool threw = false;
+  try {
+    for (const Op &op : plan) {
+      if (op.w.width == 1)
+        _device.rtw_write8(op.w.addr, static_cast<uint8_t>(op.w.value));
+      else if (op.w.width == 2)
+        _device.rtw_write16(op.w.addr, static_cast<uint16_t>(op.w.value));
+      else if (op.w.mask == 0xffffffffu)
+        _device.rtw_write32(op.w.addr, op.w.value);
+      else
+        _device.rtw_write32(op.w.addr, (_device.rtw_read32(op.w.addr) & ~op.w.mask) |
+                                           (op.w.value & op.w.mask));
+    }
+    /* The full set's tail, in its order. */
+    bb_reset_toggle();
+    const uint32_t igi = _device.rtw_read32(0x1d70);
+    _device.rtw_write32(0x1d70, igi - 0x202);
+    _device.rtw_write32(0x1d70, igi);
+    if ((bwmode == CHANNEL_WIDTH_40 || bwmode == CHANNEL_WIDTH_80) &&
+        _variant == ChipVariant::C8822E)
+      dack_soft_rst_8822e();
+  } catch (...) {
+    threw = true;
+  }
+  _device = plain;
+  const bool ok = ct->finish() && !threw;
+  _stats.prime_us = static_cast<uint32_t>(ct->prime_us());
+  _stats.flush_us = static_cast<uint32_t>(ct->flush_us());
+  _stats.flushes = static_cast<uint32_t>(ct->flushes());
+  _stats.batched_writes = static_cast<uint32_t>(ct->batched_ops());
+  _stats.sync_us = static_cast<uint32_t>(ct->passthrough_us());
+  _stats.sync_ops = static_cast<uint32_t>(ct->passthrough_ops());
+  _stats.dack_loops = _dack_loops - loops0;
+  _stats.lean_writes = static_cast<uint32_t>(plan.size());
+  if (!ok) {
+    _last_channel = 0;
+    _lean_cur_valid = false;
+    return decline("a write batch failed");
+  }
+
+  if (verify) {
+    /* Read back every register the plan changed; compare the bits it set.
+     * The RF window reads back bits [19:0] only, so it is compared there. */
+    std::vector<devourer::CtrlOp> rd;
+    std::vector<const Op *> which;
+    for (const Op &op : plan)
+      if (op.check) {
+        rd.push_back(devourer::CtrlOp{false, op.w.addr, 0});
+        which.push_back(&op);
+      }
+    if (!rd.empty() && !_device.ctrl_batch(rd)) {
+      _lean_cur_valid = false;
+      return decline("readback failed");
+    }
+    _stats.verify_regs = static_cast<uint32_t>(rd.size());
+    for (size_t i = 0; i < rd.size(); ++i) {
+      const Op &op = *which[i];
+      const uint16_t a = op.w.addr;
+      const bool rf = (a >= 0x3c00 && a < 0x4000) || (a >= 0x4c00 && a < 0x5000);
+      const uint32_t m = op.w.mask & (rf ? 0xfffffu : 0xffffffffu);
+      if ((rd[i].value & m) == (op.w.value & m))
+        continue;
+      if (_stats.verify_bad < _stats.misses.size())
+        _stats.misses[_stats.verify_bad] =
+            devourer::ChannelSetStats::Miss{a, op.w.value & m, rd[i].value & m, m};
+      ++_stats.verify_bad;
+    }
+    if (_stats.verify_bad) {
+      _lean_cur_valid = false;
+      return decline("readback differs from the full set");
+    }
+  }
+  _last_off = channel_offset;
+  _last_bw = bwmode;
+  _lean_cur_valid = true;
   return true;
 }
 
@@ -1409,6 +1637,7 @@ void RadioManagementJaguar3::write_check_afe_8822e(uint16_t add, uint32_t data) 
   const uint32_t wd = (add == 0x3800 || add == 0x3900) ? data : 0xee32001fu;
   const uint16_t wa = ((add >> 8) == 0x38) ? 0x3800 : 0x3900;
   for (uint32_t count = 0; count < 100; ++count) {
+    ++_dack_loops;
     _device.rtw_write32(0x2dd4, 0x0);
     _device.rtw_write32(add, data);
     _device.rtw_write32(add, data);

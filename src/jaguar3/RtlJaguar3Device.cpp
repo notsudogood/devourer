@@ -2,6 +2,7 @@
 #include "RtlJaguar3Device.h"
 
 #include <algorithm>
+#include <chrono>
 #include <climits> /* INT_MIN — "no radiotap DBM_TX_POWER" sentinel */
 #include <cstdio>
 #include <cstdlib>
@@ -1650,6 +1651,7 @@ void RtlJaguar3Device::SetCcaMode(bool disabled) {
 }
 
 void RtlJaguar3Device::SetMonitorChannel(SelectedChannel channel) {
+  const auto t0 = std::chrono::steady_clock::now();
   /* A window armed before this retune would integrate across the channel
    * change and report the blend as one channel's occupancy. */
   _phydm.on_channel_change();
@@ -1658,13 +1660,45 @@ void RtlJaguar3Device::SetMonitorChannel(SelectedChannel channel) {
    * radio-management core directly (no lock needed: the coex thread isn't
    * running yet), so locking here cannot self-deadlock. */
   std::lock_guard<std::mutex> lk(_reg_mu);
+  const auto t_locked = std::chrono::steady_clock::now();
+  const uint64_t x0 = _device.transport()->ctrl_xfers();
+  _radioManagement.reset_stats();
   tune_locked(channel, /*batched=*/false);
+  finish_set_stats_(t0, t_locked, x0, devourer::ChannelSetStats::Path::Plain);
 }
 
 void RtlJaguar3Device::FastSetChannel(SelectedChannel channel) {
+  const auto t0 = std::chrono::steady_clock::now();
   _phydm.on_channel_change();
   std::lock_guard<std::mutex> lk(_reg_mu);
-  tune_locked(channel, /*batched=*/_cfg.tuning.batched_chset);
+  const auto t_locked = std::chrono::steady_clock::now();
+  const uint64_t x0 = _device.transport()->ctrl_xfers();
+  _radioManagement.reset_stats();
+  tune_locked(channel, /*batched=*/_cfg.tuning.batched_chset,
+              /*lean=*/_cfg.tuning.lean_width);
+  finish_set_stats_(t0, t_locked, x0, devourer::ChannelSetStats::Path::Plain);
+}
+
+void RtlJaguar3Device::finish_set_stats_(std::chrono::steady_clock::time_point t0,
+                                         std::chrono::steady_clock::time_point t_locked,
+                                         uint64_t xfers0,
+                                         devourer::ChannelSetStats::Path plain_path) {
+  devourer::ChannelSetStats st = _radioManagement.last_stats();
+  if (st.path == devourer::ChannelSetStats::Path::None)
+    st.path = plain_path; /* neither the batched nor the lean path ran */
+  const auto now = std::chrono::steady_clock::now();
+  using us = std::chrono::microseconds;
+  st.total_us = static_cast<uint32_t>(std::chrono::duration_cast<us>(now - t0).count());
+  st.lock_us = static_cast<uint32_t>(std::chrono::duration_cast<us>(t_locked - t0).count());
+  st.xfers = static_cast<uint32_t>(_device.transport()->ctrl_xfers() - xfers0);
+  st.post_us = _post_us;
+  std::lock_guard<std::mutex> lk(_set_stats_mu);
+  _last_set_stats = st;
+}
+
+devourer::ChannelSetStats RtlJaguar3Device::LastChannelSetStats() {
+  std::lock_guard<std::mutex> lk(_set_stats_mu);
+  return _last_set_stats;
 }
 
 void RtlJaguar3Device::full_set_locked(uint8_t ch, uint8_t off, ChannelWidth_t bw) {
@@ -1673,7 +1707,7 @@ void RtlJaguar3Device::full_set_locked(uint8_t ch, uint8_t off, ChannelWidth_t b
   _radioManagement.set_channel_bwmode(ch, off, bw);
 }
 
-void RtlJaguar3Device::tune_locked(SelectedChannel channel, bool batched) {
+void RtlJaguar3Device::tune_locked(SelectedChannel channel, bool batched, bool lean) {
   /* The note must not be able to land before a concurrent arm that then
    * commits while this tune runs. _reg_mu above is what spans the tune, and
    * with_ccx takes _reg_mu BEFORE this lock, so an arm cannot interleave.
@@ -1682,13 +1716,32 @@ void RtlJaguar3Device::tune_locked(SelectedChannel channel, bool batched) {
   busy_window_note_retune();
 
   const bool ch_changed = channel.Channel != _channel.Channel;
+  const bool width_only = !ch_changed && channel.ChannelWidth != _channel.ChannelWidth;
   _channel = channel;
   _nhm_busy_ready = false;
-  if (batched)
+  /* tuning.lean_width: a width switch at the same primary writes only what
+   * the full set would change (RadioManagementJaguar3::set_width_lean); it
+   * declines -- and the full set runs -- whenever it cannot be sure. Its
+   * decision rides LastChannelSetStats (lean_skip, the readback check). */
+  bool lean_done = false;
+  const char *lean_skip = nullptr;
+  devourer::ChannelSetStats lean_stats;
+  if (lean && batched && width_only) {
+    lean_done = _radioManagement.set_width_lean(channel.Channel, channel.ChannelOffset,
+                                                channel.ChannelWidth, _cfg.tuning.lean_verify);
+    lean_stats = _radioManagement.last_stats();
+    lean_skip = lean_stats.lean_skip;
+  }
+  if (lean_done) {
+    /* done */
+  } else if (batched)
     full_set_locked(channel.Channel, channel.ChannelOffset, channel.ChannelWidth);
   else
     _radioManagement.set_channel_bwmode(channel.Channel, channel.ChannelOffset,
                                         channel.ChannelWidth);
+  if (lean && batched && width_only && !lean_done)
+    _radioManagement.note_lean_declined(lean_skip, lean_stats);
+  const auto t_post = std::chrono::steady_clock::now();
 
   /* Stored after the retune. rxsc 0 is resolved against the width configured
    * when the frame is PARSED, as the vendor does (phydm_rxsc_2_bw reads the
@@ -1716,6 +1769,9 @@ void RtlJaguar3Device::tune_locked(SelectedChannel channel, bool batched) {
    * the contract robust against future channel-path changes. */
   if (_brought_up && _txpkt_banks.active())
     apply_txpkt_banks_locked();
+  _post_us = static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                       std::chrono::steady_clock::now() - t_post)
+                                       .count());
 }
 
 void RtlJaguar3Device::FastRetune(uint8_t channel, bool cache_rf) {

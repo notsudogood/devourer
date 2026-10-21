@@ -3,7 +3,12 @@
 
 #include <cstdint>
 #include <functional>
+#include <map>
+#include <unordered_map>
 #include <vector>
+
+#include "ChannelSetStats.h"
+#include "ComposeTransport.h"
 
 #include "logger.h"
 #include "RtlAdapter.h"
@@ -79,6 +84,37 @@ public:
    * waited on their own round trip. */
   uint64_t last_batched_ops() const { return _last_batched_ops; }
   uint64_t last_passthrough_ops() const { return _last_passthrough_ops; }
+
+  /* Lean width switch (tuning.lean_width): 20/40/80 at the same primary,
+   * by writing only what the full channel set would change. Learned on the
+   * chip, not written by hand: every batched full set records its write
+   * sequence per (channel, offset, width), and a switch between two learned
+   * states replays (a) every register the full set toggles (0x1c90's 3-wire
+   * bracket and the like) in the target's order, (b) every register whose
+   * end value differs between the two states -- masked to the bits that
+   * differ, so a field another knob owns is never touched -- and (c) the
+   * full set's tail explicitly: BB reset, IGI toggle, DAC FIFO reset on the
+   * 8822E at 40/80. Declines (false, last_stats().lean_skip says why) when
+   * either state is unlearned, the radio moved since its last full set
+   * (fast_retune), the CSI-mask table would differ, or a write failed;
+   * the caller then runs the full set. With `verify`, every register it
+   * changed is read back and compared; a difference declines too, with the
+   * first few registers in last_stats().misses. Untested on air. */
+  bool set_width_lean(uint8_t channel, uint8_t channel_offset, ChannelWidth_t bwmode,
+                      bool verify);
+  /* How the last batched/lean set ran (the device layer adds lock wait,
+   * total and transfer count). */
+  const devourer::ChannelSetStats &last_stats() const { return _stats; }
+  void reset_stats() { _stats = devourer::ChannelSetStats{}; }
+  /* After a declined lean switch the full set ran: keep its timing, carry
+   * the lean path's reason and readback check. */
+  void note_lean_declined(const char *why, const devourer::ChannelSetStats &lean) {
+    _stats.lean_skip = why ? why : "declined";
+    _stats.lean_writes = lean.lean_writes;
+    _stats.verify_regs = lean.verify_regs;
+    _stats.verify_bad = lean.verify_bad;
+    _stats.misses = lean.misses;
+  }
 
   /* Firmware fast-path enabler (H2C 0x1D SINGLE_CHANNELSWITCH_V2 — protocol
    * + bench: docs/experiments/kernel-channel-switch-offload.md). The sender is injected
@@ -261,6 +297,21 @@ private:
    * seeded with the 5 GHz channel set's, grown by every read that missed. */
   std::vector<uint16_t> _batch_prime;
   uint64_t _last_batched_ops = 0, _last_passthrough_ops = 0;
+
+  /* Lean width switch state (set_width_lean). */
+  struct Learned {
+    std::vector<RegFieldWrite> fields; /* the full set's writes, as fields */
+  };
+  static uint32_t learn_key(uint8_t ch, uint8_t off, ChannelWidth_t bw) {
+    return (static_cast<uint32_t>(ch) << 16) | (static_cast<uint32_t>(off) << 8) |
+           static_cast<uint32_t>(bw);
+  }
+  std::map<uint32_t, Learned> _learned;
+  uint8_t _last_off = 0;
+  ChannelWidth_t _last_bw = CHANNEL_WIDTH_20;
+  bool _lean_cur_valid = false; /* the chip holds a full set's state at _last_* */
+  uint32_t _dack_loops = 0;     /* write_check_afe iterations, lifetime */
+  devourer::ChannelSetStats _stats;
 };
 
 } /* namespace jaguar3 */

@@ -20,6 +20,7 @@
 #include <functional>
 #include <memory>
 #include <utility>
+#include <vector>
 #include <optional>
 
 #ifdef _WIN32
@@ -53,6 +54,19 @@ class UsbDeviceLock;
 #define rtw_write16 rtw_write<uint16_t>
 #define rtw_write32 rtw_write<uint32_t>
 
+/* One register write as the code meant it: the bits it set (`mask`) and
+ * their values, not the dword a read-modify-write put on the wire. width 4
+ * = a 32-bit register (phy_set_bb_reg's field or a whole-dword write);
+ * width 1/2 = a byte/halfword write at `addr` (mask 0xff/0xffff). width 0
+ * = a write that cannot be described (a bulk write_bytes). Recorded by an
+ * RtlAdapter carrying a field log (with_field_log). */
+struct RegFieldWrite {
+  uint16_t addr;
+  uint8_t width;
+  uint32_t mask;
+  uint32_t value;
+};
+
 enum TxSele {
   TX_SELE_HQ = 1 << (0), /* High Queue */
   TX_SELE_LQ = 1 << (1), /* Low Queue */
@@ -71,6 +85,9 @@ class RtlAdapter {
   /* From DeviceConfig (see there for semantics). Plain values — RtlAdapter
    * is a copyable value type, every copy carries them. */
   bool _log_writes = false;               /* debug.log_writes */
+  /* with_field_log: every write appended here, as fields (null = off). */
+  std::vector<RegFieldWrite> *_field_log = nullptr;
+  bool _in_field_write = false; /* phy_set_bb_reg's own rtw_write32: logged once */
   std::optional<uint8_t> _tx_ep_override; /* tx.ep */
   unsigned _tx_timeout_ms = 500;          /* tx.timeout_ms */
 
@@ -95,6 +112,14 @@ public:
     copy._transport = std::move(t);
     return copy;
   }
+  /* A copy that records every register write, as fields, into *log --
+   * what a learned register sequence (Jaguar3's lean width switch) is
+   * built from. */
+  RtlAdapter with_field_log(std::vector<RegFieldWrite> *log) const {
+    RtlAdapter copy = *this;
+    copy._field_log = log;
+    return copy;
+  }
   /* Pre-power-on HCI programming (rtw88 rtw_hci_setup slot): PCIe TRX ring
    * registers; no-op on USB. Call per bring-up attempt, before power-on. */
   void hci_setup() { _transport->hci_setup(); }
@@ -110,6 +135,10 @@ public:
     /* debug.log_writes parity with rtw_write: a batched write is still a
      * write: keeps tests/decode_wseq.py's golden sequence identical whether
      * or not a path batches. */
+    if (_field_log)
+      for (const devourer::CtrlOp &op : ops)
+        if (op.write)
+          _field_log->push_back(RegFieldWrite{op.addr, 4, 0xffffffffu, op.value});
     if (_log_writes)
       for (const devourer::CtrlOp &op : ops)
         if (op.write)
@@ -225,6 +254,12 @@ public:
           .hexf("addr", reg_num, 4)
           .f("width", sizeof(T))
           .hexf("val", (unsigned long long)value, (int)(sizeof(T) * 2));
+    if (_field_log && !_in_field_write)
+      _field_log->push_back(RegFieldWrite{reg_num, static_cast<uint8_t>(sizeof(T)),
+                                          sizeof(T) == 4 ? 0xffffffffu
+                                          : sizeof(T) == 2 ? 0xffffu
+                                                           : 0xffu,
+                                          static_cast<uint32_t>(value)});
     if constexpr (sizeof(T) == 1)
       return _transport->write8(reg_num, value);
     else if constexpr (sizeof(T) == 2)
@@ -234,6 +269,8 @@ public:
   }
 
   bool WriteBytes(uint16_t reg_num, uint8_t *ptr, size_t size) {
+    if (_field_log)
+      _field_log->push_back(RegFieldWrite{reg_num, 0, 0, static_cast<uint32_t>(size)});
     return _transport->write_bytes(reg_num, ptr, size);
   }
 

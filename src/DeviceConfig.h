@@ -375,6 +375,18 @@ struct DeviceConfig {
      * blocking read-modify-write per field. Default ON; "0" restores the
      * plain path. SetMonitorChannel is always plain. */
     bool batched_chset = true;
+    /* env: DEVOURER_LEAN_WIDTH — Jaguar3: a 20/40/80 width switch at the
+     * same primary through FastSetChannel writes only what the full set
+     * would change, learned from the full sets this session ran
+     * (RadioManagementJaguar3::set_width_lean); it declines to the batched
+     * full set whenever a state is unlearned or anything is unclear. Needs
+     * batched_chset. Default OFF: untested on air. "1" = on. */
+    bool lean_width = false;
+    /* env: DEVOURER_LEAN_VERIFY — with lean_width: read every register the
+     * lean switch changed back from the chip and decline to the full set on
+     * any difference (the registers in LastChannelSetStats().misses).
+     * Default ON; "0" skips the readback (one batched read). */
+    bool lean_verify = true;
     /* env: DEVOURER_KFR_OFLD — Kestrel FastRetune firmware IO-offload (mac_ax
      * fwofld.c): batch the whole same-sub-band hop (RF18/0xcf channel set + BB
      * reset + fixed TX power) into ONE FW_OFLD/CMD_OFLD_REG H2C the on-chip fw

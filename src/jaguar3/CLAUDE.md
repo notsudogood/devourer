@@ -72,7 +72,35 @@ fake: 8822E ~60 vs ~190 spur-free, ~90 vs ~215 on a spur channel (the
 uncached reads are the remainder); 8822C ~7 vs ~90. Unmeasured on hardware:
 the wall-clock time, and whether any cached register's readback differs
 from its last write on real silicon (the risk the uncached set covers for
-the known ports).
+the known ports). On one SSC338Q + 8812EU drone the batched width switch
+measured 68–99 ms through `FastSetChannel`, the same as the plain path;
+where that time goes is what `IRtlRadio::LastChannelSetStats`
+(`src/ChannelSetStats.h`: lock wait, priming read, write batches, single
+round trips, post-set re-asserts, transfer count, DAC confirm loops) is
+there to show.
+
+### Lean width switch (`tuning.lean_width`, default OFF)
+
+`set_width_lean` is a 20/40/80 switch at the same primary that writes only
+what the full set would change. Each batched full set records its writes as
+fields (`RtlAdapter::with_field_log`: the mask and value each write meant,
+not the composed dword, so bits a state never writes carry no history),
+keyed by (channel, offset, width). A switch from learned A to learned B
+replays B's bracket/gate registers (any bit written twice with different
+values) in order, writes each set-once register's bits that A does not
+already hold as a masked RMW, replays B's whole CSI-mask table sequence
+when it differs from A's (both spur paths clean every tone any case sets
+first), then runs the tail itself: BB reset, IGI toggle, the 8822E DAC
+reset at 40/80. It declines -- and `tune_locked` runs the batched full
+set -- when either state is unlearned, after any move without a full set
+(`fast_retune`, the fw path), on a bulk write, a failed batch or, with
+`tuning.lean_verify` (default on), a readback of the planned bits that
+differs (RF window compared on bits [19:0]). Offline (same fake chip):
+byte-identical state to the plain path on both dies at 132/140/153; 8822E
+~20 vs ~190 round trips (5 vs 144 for →20), ~80 vs ~215 on a spur primary
+where the table port's reads must reach the chip; 8822C ~5 vs ~90. Not yet
+run on hardware: whether real registers read back their writes (the verify
+misses will name any that do not), and the wall clock.
 
 ## Bring-up cost and the pipelined register writes
 

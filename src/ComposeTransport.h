@@ -2,6 +2,7 @@
 #define DEVOURER_COMPOSE_TRANSPORT_H
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <set>
@@ -55,6 +56,12 @@ public:
   /* One batched read of `addrs` into the cache. False (and nothing cached)
    * when any read failed. */
   bool prime(const std::vector<uint16_t> &addrs) {
+    const auto t0 = std::chrono::steady_clock::now();
+    struct Acc {
+      uint64_t &us;
+      std::chrono::steady_clock::time_point t0;
+      ~Acc() { us += since(t0); }
+    } acc{_prime_us, t0};
     std::vector<CtrlOp> ops;
     ops.reserve(addrs.size());
     for (uint16_t a : addrs)
@@ -83,6 +90,13 @@ public:
    * reads/writes), and ops that went out in batches. */
   uint64_t passthrough_ops() const { return _passthrough; }
   uint64_t batched_ops() const { return _batched; }
+  /* Wall-clock spent in the priming read, in write batches and in the
+   * transfers that waited on their own round trip -- what a switch costs
+   * on real hardware, where the round-trip count alone does not say. */
+  uint64_t prime_us() const { return _prime_us; }
+  uint64_t flush_us() const { return _flush_us; }
+  uint64_t flushes() const { return _flushes; }
+  uint64_t passthrough_us() const { return _pass_us; }
 
   /* ---- register plane ---- */
   uint32_t read32(uint16_t reg) override {
@@ -93,7 +107,9 @@ public:
     }
     flush();
     ++_passthrough;
+    const auto t0 = std::chrono::steady_clock::now();
     const uint32_t v = _real->read32(reg);
+    _pass_us += since(t0);
     if (!_uncached.count(reg)) {
       _cache[reg] = v;
       _missed.push_back(reg);
@@ -110,22 +126,34 @@ public:
   uint8_t read8(uint16_t reg) override {
     flush();
     ++_passthrough;
-    return _real->read8(reg);
+    const auto t0 = std::chrono::steady_clock::now();
+    const uint8_t v = _real->read8(reg);
+    _pass_us += since(t0);
+    return v;
   }
   uint16_t read16(uint16_t reg) override {
     flush();
     ++_passthrough;
-    return _real->read16(reg);
+    const auto t0 = std::chrono::steady_clock::now();
+    const uint16_t v = _real->read16(reg);
+    _pass_us += since(t0);
+    return v;
   }
   bool write8(uint16_t reg, uint8_t v) override {
     flush();
     forget(reg, 1);
-    return pass(_real->write8(reg, v));
+    const auto t0 = std::chrono::steady_clock::now();
+    const bool ok = _real->write8(reg, v);
+    _pass_us += since(t0);
+    return pass(ok);
   }
   bool write16(uint16_t reg, uint16_t v) override {
     flush();
     forget(reg, 2);
-    return pass(_real->write16(reg, v));
+    const auto t0 = std::chrono::steady_clock::now();
+    const bool ok = _real->write16(reg, v);
+    _pass_us += since(t0);
+    return pass(ok);
   }
   bool write_bytes(uint16_t reg, const uint8_t *p, size_t n) override {
     flush();
@@ -208,12 +236,21 @@ public:
 private:
   static constexpr size_t kMaxQueued = 64;
 
+  static uint64_t since(std::chrono::steady_clock::time_point t0) {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                     std::chrono::steady_clock::now() - t0)
+                                     .count());
+  }
+
   void flush() {
     if (_ops.empty())
       return;
     _batched += _ops.size();
+    ++_flushes;
+    const auto t0 = std::chrono::steady_clock::now();
     if (!_real->ctrl_batch(_ops))
       _failed = true;
+    _flush_us += since(t0);
     _ops.clear();
   }
   bool pass(bool ok) {
@@ -236,6 +273,7 @@ private:
   std::vector<uint16_t> _missed;
   uint64_t _passthrough = 0;
   uint64_t _batched = 0;
+  uint64_t _prime_us = 0, _flush_us = 0, _flushes = 0, _pass_us = 0;
   bool _failed = false;
 };
 

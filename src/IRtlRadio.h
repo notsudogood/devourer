@@ -2,6 +2,7 @@
 #define IRTL_RADIO_H
 
 #include "IRadio.h"
+#include "ChannelSetStats.h"
 
 #include "AdapterHealth.h" /* EfuseStability */
 #include <mutex>
@@ -101,6 +102,13 @@ public:
    * exception on USB (house idiom), never as -1. One register read under the
    * control-plane lock. */
   virtual int ReadTunedCentral() { return -1; }
+
+  /* How the last SetMonitorChannel / FastSetChannel ran and what it cost
+   * (ChannelSetStats.h): path, wall clock split into lock wait, priming
+   * read, write batches and single round trips, the transfer count, and the
+   * lean width switch's decision and readback check. Diagnostic; Jaguar3
+   * only, others return an empty record (path None). */
+  virtual devourer::ChannelSetStats LastChannelSetStats() { return {}; }
 
   /* The neutral reading (IRadio::GetChannelBusy), expressed in this family's
    * own facility: CLM busy airtime plus NHM-env, both of which ride

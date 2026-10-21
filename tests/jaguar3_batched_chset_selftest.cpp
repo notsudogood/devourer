@@ -18,6 +18,7 @@
  * Also pins the point of the exercise: the batched path's blocking transfers
  * per step are a small fraction of the plain path's. */
 #include <cstdio>
+#include <cstring>
 #include <cstdlib>
 #include <map>
 #include <memory>
@@ -161,6 +162,74 @@ int main() {
        * spur-free move, ~90 against ~215 on a spur one. */
       if (&s != &steps.front())
         CHECK(b->blocking * 2 < a->blocking);
+    }
+  }
+
+  /* Lean width switch (set_width_lean): after one batched full set per
+   * width has been learned, a 20/40/80 switch at the same primary must
+   * leave the chip in the full set's state, in a fraction of its transfers,
+   * and pass its own readback check. */
+  for (auto variant : {jaguar3::ChipVariant::C8822E, jaguar3::ChipVariant::C8822C}) {
+    const char *vn = variant == jaguar3::ChipVariant::C8822E ? "8822E" : "8822C";
+    for (uint8_t prim : {uint8_t{132}, uint8_t{140}, uint8_t{153}}) {
+      auto a = std::make_shared<FakeChip>();
+      auto b = std::make_shared<FakeChip>();
+      jaguar3::RadioManagementJaguar3 ra(RtlAdapter(a, logger, cfg), logger, variant, cfg);
+      jaguar3::RadioManagementJaguar3 rb(RtlAdapter(b, logger, cfg), logger, variant, cfg);
+      const uint8_t off40 = prim == 132 || prim == 140 ? 1 : 2;   /* 153 is HT40- */
+      ra.set_channel_bwmode(prim, 0, CHANNEL_WIDTH_80);
+      rb.set_channel_bwmode(prim, 0, CHANNEL_WIDTH_80);
+      struct W { uint8_t off; ChannelWidth_t bw; };
+      const W w20{0, CHANNEL_WIDTH_20}, w40{off40, CHANNEL_WIDTH_40}, w80{0, CHANNEL_WIDTH_80};
+      for (const W &w : {w40, w20, w80}) {   /* learn each width once */
+        ra.set_channel_bwmode(prim, w.off, w.bw);
+        CHECK(rb.set_channel_bwmode_batched(prim, w.off, w.bw));
+      }
+      CHECK(a->bytes == b->bytes);
+      int leaned = 0, declined = 0;
+      for (const W &w : {w40, w80, w20, w40, w20, w80, w40}) {
+        a->blocking = 0;
+        b->blocking = 0;
+        ra.set_channel_bwmode(prim, w.off, w.bw);
+        bool ok = rb.set_width_lean(prim, w.off, w.bw, /*verify=*/true);
+        const char *skip = rb.last_stats().lean_skip;
+        CHECK(ok);
+        if (!ok)
+          std::fprintf(stderr, "  %s %u lean declined: %s\n", vn, prim, skip ? skip : "?");
+        if (!ok) {
+          ++declined;
+          CHECK(rb.set_channel_bwmode_batched(prim, w.off, w.bw));
+        }
+        const bool same = a->bytes == b->bytes;
+        CHECK(same);
+        if (!same)
+          for (const auto &kv : a->bytes)
+            if (b->bytes.count(kv.first) && b->bytes[kv.first] != kv.second)
+              std::fprintf(stderr, "  %s %u -> %d: byte %04x plain %02x lean %02x\n", vn, prim,
+                           static_cast<int>(w.bw), kv.first, kv.second, b->bytes[kv.first]);
+        if (!ok)
+          continue;
+        ++leaned;
+        CHECK(rb.last_stats().verify_bad == 0);
+        std::printf("%s lean %u -> %s: plain %4llu round trips, lean %3llu (%u writes planned)\n",
+                    vn, prim, w.bw == CHANNEL_WIDTH_80 ? "80" : w.bw == CHANNEL_WIDTH_40 ? "40" : "20",
+                    (unsigned long long)a->blocking, (unsigned long long)b->blocking,
+                    rb.last_stats().lean_writes);
+        /* A spur channel replays the CSI-mask table port, whose reads must
+         * reach the chip: ~80 against ~210 there, ~20 against ~190 off it. */
+        const bool spur = variant == jaguar3::ChipVariant::C8822E && prim == 153;
+        CHECK(b->blocking * (spur ? 2 : 3) < a->blocking);
+      }
+      std::printf("%s lean %u: %d lean, %d declined to the full set\n", vn, prim, leaned, declined);
+      CHECK(leaned > 0);
+      /* A move without a full set (fast_retune) makes the state unknown:
+       * the next switch must decline, not guess. */
+      const uint8_t other = off40 == 1 ? (prim == 132 ? 140 : 132) : 136;
+      if (rb.fast_retune(other, off40, CHANNEL_WIDTH_40, true) &&
+          rb.fast_retune(prim, off40, CHANNEL_WIDTH_40, true)) {
+        CHECK(!rb.set_width_lean(prim, 0, CHANNEL_WIDTH_80, true));
+        CHECK(rb.last_stats().lean_skip != nullptr);
+      }
     }
   }
 
