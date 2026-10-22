@@ -104,9 +104,12 @@ set -- when either state is unlearned, after any move without a full set
 differs (RF window compared on bits [19:0]). Offline (same fake chip):
 byte-identical state to the plain path on both dies at 132/140/153; 8822E
 ~20 vs ~190 round trips (5 vs 144 for →20), ~80 vs ~215 on a spur primary
-where the table port's reads must reach the chip; 8822C ~5 vs ~90. Not yet
-run on hardware: whether real registers read back their writes (the verify
-misses will name any that do not), and the wall clock.
+where the table port's reads must reach the chip; 8822C ~5 vs ~90. On
+hardware (one 8812EU on an SSC338Q drone, ch 132, 40 <-> 80, with the
+caller and RX threads at SCHED_FIFO): five lean switches, 0 readback
+misses, 7.0–8.2 ms and 85–87 control transfers against 14–17 ms and
+171–173 for the batched full set. Not yet run on a real chip: 20 MHz, a
+spur primary, the 8822C.
 
 ## Bring-up cost and the pipelined register writes
 
