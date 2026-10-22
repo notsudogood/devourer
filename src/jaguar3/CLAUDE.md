@@ -74,10 +74,16 @@ the wall-clock time, and whether any cached register's readback differs
 from its last write on real silicon (the risk the uncached set covers for
 the known ports). On one SSC338Q + 8812EU drone the batched width switch
 measured 68–99 ms through `FastSetChannel`, the same as the plain path;
-where that time goes is what `IRtlRadio::LastChannelSetStats`
-(`src/ChannelSetStats.h`: lock wait, priming read, write batches, single
-round trips, post-set re-asserts, transfer count, DAC confirm loops) is
-there to show.
+`IRtlRadio::LastChannelSetStats` (`src/ChannelSetStats.h`: lock wait,
+priming read, write batches, single round trips, post-set re-asserts,
+transfer count, DAC confirm loops) then showed where. Same 171–173 control
+transfers on the drone (79–135 ms, ~0.55 ms each) and an RK3566 GS
+(25–36 ms); the drone's InitWrite does 27 µs per pipelined write. With the
+calling thread and the thread running the RX loop (it holds libusb's event
+lock and reaps every completion) at SCHED_FIFO above the drone's encoder,
+the same switch took 14–17 ms (~0.08 ms per transfer). On a loaded
+embedded host the cost is the scheduling of those two threads, not USB or
+the register count. One drone, one session, five switches.
 
 ### Lean width switch (`tuning.lean_width`, default OFF)
 
