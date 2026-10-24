@@ -254,6 +254,37 @@ int main() {
     }
   }
 
+  /* tuning.spur_ext_8822e: the 5880 MHz rows (177@20, 173+177@40 = centre
+   * 175). On: the manual NBI notch at the tone (0x1944[20:12], enable
+   * 0x1940[31]) and the batched path writes what the plain one does. Off:
+   * the spur-free default, as before the rows existed. */
+  {
+    using RM = jaguar3::RadioManagementJaguar3;
+    struct Ext { uint8_t ch, off; ChannelWidth_t bw; uint32_t tone; };
+    for (bool on : {true, false}) {
+      devourer::DeviceConfig ecfg = cfg;
+      ecfg.tuning.spur_ext_8822e = on;
+      for (Ext t : {Ext{177, 0, CHANNEL_WIDTH_20, 112}, Ext{173, 1, CHANNEL_WIDTH_40, 16}}) {
+        auto a = std::make_shared<FakeChip>();
+        auto b = std::make_shared<FakeChip>();
+        RM ra(RtlAdapter(a, logger, ecfg), logger, jaguar3::ChipVariant::C8822E, ecfg);
+        RM rb(RtlAdapter(b, logger, ecfg), logger, jaguar3::ChipVariant::C8822E, ecfg);
+        ra.set_channel_bwmode(132, 0, CHANNEL_WIDTH_80);
+        rb.set_channel_bwmode(132, 0, CHANNEL_WIDTH_80);
+        ra.set_channel_bwmode(t.ch, t.off, t.bw);
+        CHECK(rb.set_channel_bwmode_batched(t.ch, t.off, t.bw));
+        CHECK(a->writes == b->writes && a->bytes == b->bytes);
+        const bool nbi = (a->get(0x1940, 4) >> 31) & 1;
+        const uint32_t tone = (a->get(0x1944, 4) >> 12) & 0x1ff;
+        CHECK(nbi == on);
+        CHECK(tone == (on ? t.tone : 0u));
+        /* Out again to a spur-free channel: the notch is cleared. */
+        ra.set_channel_bwmode(132, 0, CHANNEL_WIDTH_80);
+        CHECK(((a->get(0x1940, 4) >> 31) & 1) == 0);
+      }
+    }
+  }
+
   if (fails)
     std::fprintf(stderr, "%d failure(s)\n", fails);
   else

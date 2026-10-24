@@ -197,7 +197,7 @@ private:
    * CCK TX shaping filter + spur elimination (manual NBI / CSI mask). */
   void cck_tx_shaping_8822e(uint8_t central);
   void spur_eliminate_8822e(uint8_t ch, ChannelWidth_t bw);
-  static bool is_spur_combo_8822e(uint8_t ch, ChannelWidth_t bw);
+  bool is_spur_combo_8822e(uint8_t ch, ChannelWidth_t bw) const;
   void set_manual_nbi_8822e(bool en, uint32_t tone_idx);
   void set_nbi_wa_para_8822e(bool en, ChannelWidth_t bw);
   void set_csi_mask_8822e(uint32_t tone_idx, uint8_t weight);

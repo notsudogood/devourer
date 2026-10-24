@@ -361,15 +361,17 @@ void RadioManagementJaguar3::clean_csi_mask_8822e() {
 }
 
 /* Central-channel/BW combos phydm_spur_eliminate_8822e special-cases —
- * shared by the spur apply below and the fast_retune decline gate. */
+ * shared by the spur apply below and the fast_retune decline gate. With
+ * tuning.spur_ext_8822e, also the 5880 MHz rows (177@20, 175@40). */
 bool RadioManagementJaguar3::is_spur_combo_8822e(uint8_t ch,
-                                                 ChannelWidth_t bw) {
+                                                 ChannelWidth_t bw) const {
+  const bool ext = _cfg.tuning.spur_ext_8822e;
   switch (bw) {
   case CHANNEL_WIDTH_20:
-    return ch == 153 || ch == 161 || ch == 169;
+    return ch == 153 || ch == 161 || ch == 169 || (ext && ch == 177);
   case CHANNEL_WIDTH_40:
     return ch == 151 || ch == 159 || ch == 167 || ch == 54 || ch == 102 ||
-           ch == 118;
+           ch == 118 || (ext && ch == 175);
   case CHANNEL_WIDTH_80:
     return ch == 155 || ch == 171 || ch == 58 || ch == 106 || ch == 122;
   default:
@@ -413,10 +415,19 @@ void RadioManagementJaguar3::spur_eliminate_8822e(uint8_t ch,
       {106, CHANNEL_WIDTH_80, false, 0, {224, 0, 0}, 1, 0xa, 0x00ff},
       {118, CHANNEL_WIDTH_40, false, 0, {32, 0, 0}, 1, 0xc, 0x00ff},
       {122, CHANNEL_WIDTH_80, false, 0, {224, 0, 0}, 1, 0xa, 0x00ff},
+      /* tuning.spur_ext_8822e only (not vendor rows): the 5880 MHz spike,
+       * the next of the 5760/5800/5840 family, 5 MHz below 177's centre
+       * (tone 112 at 20 MHz) and 5 MHz above 175's (tone 16 at 40 MHz) --
+       * the same offsets, so the vendor's 169@20 / 167@40 values. */
+      {177, CHANNEL_WIDTH_20, true, 112, {112, 0, 0}, 1, 0xa, 0x60e0},
+      {175, CHANNEL_WIDTH_40, true, 16, {16, 0, 0}, 1, 0xa, 0x00e0},
   };
+  const bool ext = _cfg.tuning.spur_ext_8822e;
   for (const Case &c : cases) {
     if (c.ch != ch || c.bw != bw)
       continue;
+    if (!ext && (c.ch == 177 || c.ch == 175))
+      break;  /* extension rows off: the spur-free default below */
     clean_csi_mask_8822e();
     set_manual_nbi_8822e(c.nbi, c.nbi_tone);
     set_nbi_wa_para_8822e(c.nbi, bw);

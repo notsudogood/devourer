@@ -387,6 +387,15 @@ struct DeviceConfig {
      * any difference (the registers in LastChannelSetStats().misses).
      * Default ON; "0" skips the readback (one batched read). */
     bool lean_verify = true;
+    /* env: DEVOURER_SPUR_EXT — 8822E: extend phydm's spur table, which stops
+     * at the 5840 MHz spike (169@20, 167@40), to the next one in the same
+     * family, 5880 MHz: 177@20 (NBI tone 112) and 175@40 = the 173+177 pair
+     * (tone 16), the same notch, CSI weight and packet-detection values as
+     * the vendor's 169@20 / 167@40 rows. Not a vendor setting. On one
+     * 8812EU drone, 173 at 40 MHz stalled the TX path without it (USB
+     * hand-offs 40-170 ms); not yet tested with it. Default OFF; "1" = on.
+     * 80 MHz is not extended (the 165-177 block holds two spikes). */
+    bool spur_ext_8822e = false;
     /* env: DEVOURER_KFR_OFLD — Kestrel FastRetune firmware IO-offload (mac_ax
      * fwofld.c): batch the whole same-sub-band hop (RF18/0xcf channel set + BB
      * reset + fixed TX power) into ONE FW_OFLD/CMD_OFLD_REG H2C the on-chip fw

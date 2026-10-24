@@ -100,6 +100,13 @@ was a real failure on the bench:
   (153/161/169@20, 151/159/167@40, 155/171@80, 54/102/118@40, 58/106/122@80),
   explicit spur-free default elsewhere. `FastRetune` declines hops into or
   out of these combos (the lean hop can't reprogram the notch state).
+  The vendor table stops at the 5840 MHz spike. `tuning.spur_ext_8822e`
+  (`DEVOURER_SPUR_EXT=1`, default off) adds the next one, 5880 MHz, as
+  177@20 and 175@40 (the 173+177 pair) with the vendor's 169@20 / 167@40
+  values -- not vendor rows. On one 8812EU drone, 153/161/169@20 and
+  173@40 stalled the TX path (USB hand-offs 40-170 ms, queue drops) even
+  with the vendor notch on the first three, so a notch does not by itself
+  cure the stall; 173 with the extension is untested.
 - **CCK TX shaping filter** (2.4 GHz, per channel; ch14 special set) + per-band
   TX backoff/scaling.
 - 2.4 GHz RX needs the RF-write force-update brackets (`0x1830[29]`/
