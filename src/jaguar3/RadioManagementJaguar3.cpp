@@ -1263,6 +1263,40 @@ void RadioManagementJaguar3::set_mac_bw_txsc(ChannelWidth_t bw, uint8_t pri) {
     sc = static_cast<uint8_t>((pri & 0xf) | (txsc40 << 4));
   }
   _device.rtw_write8(0x483, sc);
+
+  /* halmac cfg_bw_88xx ends in cfg_mac_clk_88xx, so the vendor puts the MAC
+   * clock back to 80M at every 20/40/80 switch. Here only the narrowband
+   * re-clock ever moves it, so only a full set leaving narrowband restores
+   * it -- without this, a 10 -> 20/40/80 full set left the 8822e MAC in its
+   * 20M clock mode for the rest of the session (seen on a ground station's
+   * 8812EUs as path-B RSSI and per-path SNR reading ~0 from the moment it
+   * returned from a 10 MHz trip, while frames still decoded). */
+  if (_variant == ChipVariant::C8822E && _mac_clk_nb &&
+      bw != CHANNEL_WIDTH_5 && bw != CHANNEL_WIDTH_10) {
+    set_mac_clk_8822e(bw);
+    _logger->info("Jaguar3: MAC clock restored to 80M after narrowband");
+  }
+}
+
+void RadioManagementJaguar3::set_mac_clk_8822e(ChannelWidth_t bw) {
+  /* halmac cfg_mac_clk_88xx — the MAC-side half of the narrowband re-clock:
+   * MAC clock select at REG_AFE_CTRL1 0x24[21:20] (0=80M, 2=20M, 3=the
+   * dedicated 20M_BW_5 mode) + the TSF/EDCA microsecond-tick clocks
+   * (0x55c/0x638, in MHz). The vendor applies this for BW5/BW10 on every
+   * Jaguar3; the SDR-validated 8822c NB path works without it, so it is
+   * applied on the 8822e only, where 5 MHz TX never reaches the air without
+   * the 20M_BW_5 MAC mode. */
+  uint8_t clk_sel, ustime;
+  if (bw == CHANNEL_WIDTH_5)       { clk_sel = 3; ustime = 20; }
+  else if (bw == CHANNEL_WIDTH_10) { clk_sel = 2; ustime = 20; }
+  else                             { clk_sel = 0; ustime = 80; }
+  uint32_t afe = _device.rtw_read32(0x24);
+  afe = (afe & ~((1u << 20) | (1u << 21))) |
+        (static_cast<uint32_t>(clk_sel) << 20);
+  _device.rtw_write32(0x24, afe);
+  _device.rtw_write8(0x55c, ustime);
+  _device.rtw_write8(0x638, ustime);
+  _mac_clk_nb = clk_sel != 0;
 }
 
 void RadioManagementJaguar3::set_tx_power_ref(uint8_t idx, bool zero_diffs) {
@@ -1559,23 +1593,7 @@ void RadioManagementJaguar3::set_bandwidth_dividers(ChannelWidth_t bwmode) {
   _device.phy_set_bb_reg(R_CLK_DIV_8822C, 0x00700000, adc);   /* 0x9b4[22:20] */
 
   if (is_e) {
-    /* halmac cfg_mac_clk_88xx — the MAC-side half of the narrowband re-clock:
-     * MAC clock select at REG_AFE_CTRL1 0x24[21:20] (0=80M, 2=20M, 3=the
-     * dedicated 20M_BW_5 mode) + the TSF/EDCA microsecond-tick clocks
-     * (0x55c/0x638, in MHz). The vendor applies this for BW5/BW10 on every
-     * Jaguar3; the SDR-validated 8822c NB path works without it, so it is
-     * applied on the 8822e only, where 5 MHz TX never reaches the air without
-     * the 20M_BW_5 MAC mode. */
-    uint8_t clk_sel, ustime;
-    if (bwmode == CHANNEL_WIDTH_5)       { clk_sel = 3; ustime = 20; }
-    else if (bwmode == CHANNEL_WIDTH_10) { clk_sel = 2; ustime = 20; }
-    else                                 { clk_sel = 0; ustime = 80; }
-    uint32_t afe = _device.rtw_read32(0x24);
-    afe = (afe & ~((1u << 20) | (1u << 21))) |
-          (static_cast<uint32_t>(clk_sel) << 20);
-    _device.rtw_write32(0x24, afe);
-    _device.rtw_write8(0x55c, ustime);
-    _device.rtw_write8(0x638, ustime);
+    set_mac_clk_8822e(bwmode);
 
     /* config_phydm_switch_bandwidth_8822e narrowband extras the 8822c recipe
      * doesn't have: CFR (crest-factor reduction) params + TX triangular-shape

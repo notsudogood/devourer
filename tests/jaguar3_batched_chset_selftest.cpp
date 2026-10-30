@@ -285,6 +285,72 @@ int main() {
     }
   }
 
+  /* A trip through narrowband must not outlive itself: a full set from 5/10
+   * MHz back to 20/40/80 leaves the chip as a set that never left, except for
+   * the 8822E TX-shaping registers the narrowband recipe writes (0x80c,
+   * 0x81c, 0x8a0, 0xa74 -- its values are the BB table's own, which this fake
+   * does not load). The regression this pins: the 8822E MAC clock select
+   * (0x24[21:20]) and microsecond ticks (0x55c/0x638) stayed in their 20M
+   * narrowband mode after the return. Plain and batched paths alike. */
+  for (auto variant : {jaguar3::ChipVariant::C8822E, jaguar3::ChipVariant::C8822C}) {
+    const char *vn = variant == jaguar3::ChipVariant::C8822E ? "8822E" : "8822C";
+    struct Trip { ChannelWidth_t nb; uint8_t off; ChannelWidth_t back; };
+    for (Trip t : {Trip{CHANNEL_WIDTH_10, 0, CHANNEL_WIDTH_20}, Trip{CHANNEL_WIDTH_5, 0, CHANNEL_WIDTH_20},
+                   Trip{CHANNEL_WIDTH_10, 1, CHANNEL_WIDTH_40}, Trip{CHANNEL_WIDTH_10, 0, CHANNEL_WIDTH_80}}) {
+      for (bool batched : {false, true}) {
+        auto never = std::make_shared<FakeChip>();
+        auto trip = std::make_shared<FakeChip>();
+        for (auto &c : {never, trip}) {   /* bring-up state (MacInit::cfg_mac_clk) */
+          c->put(0x24, 4, c->get(0x24, 4) & ~(0x3u << 20));
+          c->put(0x55c, 1, 80);
+          c->put(0x638, 1, 80);
+        }
+        jaguar3::RadioManagementJaguar3 rn(RtlAdapter(never, logger, cfg), logger, variant, cfg);
+        jaguar3::RadioManagementJaguar3 rt(RtlAdapter(trip, logger, cfg), logger, variant, cfg);
+        auto set = [batched](jaguar3::RadioManagementJaguar3 &r, uint8_t off, ChannelWidth_t bw) {
+          if (batched)
+            CHECK(r.set_channel_bwmode_batched(132, off, bw));
+          else
+            r.set_channel_bwmode(132, off, bw);
+        };
+        set(rn, 0, CHANNEL_WIDTH_20);
+        set(rt, 0, CHANNEL_WIDTH_20);
+        set(rt, 0, t.nb);
+        if (variant == jaguar3::ChipVariant::C8822E) {
+          CHECK(((trip->get(0x24, 4) >> 20) & 0x3) == (t.nb == CHANNEL_WIDTH_5 ? 3u : 2u));
+          CHECK(trip->get(0x55c, 1) == 20 && trip->get(0x638, 1) == 20);
+        }
+        set(rn, t.off, t.back);
+        set(rt, t.off, t.back);
+        CHECK(((trip->get(0x24, 4) >> 20) & 0x3) == 0);
+        CHECK(trip->get(0x55c, 1) == 80 && trip->get(0x638, 1) == 80);
+        /* Every byte either chip wrote: one only the trip wrote must still
+         * read as the never-written power-on value. */
+        std::map<uint16_t, bool> addrs;
+        for (const auto &kv : never->bytes) addrs[kv.first] = true;
+        for (const auto &kv : trip->bytes) addrs[kv.first] = true;
+        int diff = 0;
+        for (const auto &kv : addrs) {
+          const uint16_t a = kv.first;
+          const uint16_t dw = a & ~3u;
+          /* Also skipped: the DAC FIFO reset the re-clock pulses (the AFE
+           * DACK banks and their write-confirm port) -- a reset, not state. */
+          if (variant == jaguar3::ChipVariant::C8822E &&
+              (dw == 0x80c || dw == 0x81c || dw == 0x8a0 || dw == 0xa74 || dw == 0x2dd4 ||
+               dw == 0x3800 || dw == 0x382c || dw == 0x3900 || dw == 0x392c))
+            continue;
+          if (trip->byte_at(a) != never->byte_at(a)) {
+            ++diff;
+            std::fprintf(stderr, "  %s %s nb trip -> %d: byte %04x never-left %02x after-trip %02x\n", vn,
+                         batched ? "batched" : "plain", static_cast<int>(t.back), a, never->byte_at(a),
+                         trip->byte_at(a));
+          }
+        }
+        CHECK(diff == 0);
+      }
+    }
+  }
+
   if (fails)
     std::fprintf(stderr, "%d failure(s)\n", fails);
   else

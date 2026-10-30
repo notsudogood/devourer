@@ -158,6 +158,11 @@ public:
    * pri is the BB primary-sub-channel index (0 for 20M). */
   void set_mac_bw_txsc(ChannelWidth_t bw, uint8_t pri);
 
+  /* 8822e MAC clock select + microsecond ticks for bw (halmac
+   * cfg_mac_clk_88xx): the 20M modes for 5/10 MHz, 80M otherwise. Tracks
+   * _mac_clk_nb so a full set leaving narrowband puts the clock back. */
+  void set_mac_clk_8822e(ChannelWidth_t bw);
+
   /* Set the TX-power reference (7-bit index, both paths). With zero_diffs=true
    * (the DEVOURER_TX_PWR debug knob) the per-rate diff table is flattened so
    * every rate emits at `idx`. With zero_diffs=false (the default bring-up path)
@@ -310,6 +315,7 @@ private:
   uint8_t _last_off = 0;
   ChannelWidth_t _last_bw = CHANNEL_WIDTH_20;
   bool _lean_cur_valid = false; /* the chip holds a full set's state at _last_* */
+  bool _mac_clk_nb = false;     /* 8822e MAC clock left in a narrowband mode */
   uint32_t _dack_loops = 0;     /* write_check_afe iterations, lifetime */
   devourer::ChannelSetStats _stats;
 };

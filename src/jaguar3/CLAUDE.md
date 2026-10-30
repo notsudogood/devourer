@@ -22,6 +22,19 @@ narrowband dividers, RF18 encoding), strategy interfaces `Jaguar3Calibration`
 - **5/10 MHz narrowband**: the re-clock lives in the `0x9b0`/`0x9b4`
   dividers (vs the `0x8ac` block the Jaguar1/2 chips share). 80 MHz works,
   incl. a 40-in-80 frame via TX-descriptor DATA_SC. See `docs/narrowband.md`.
+  On the 8822e the re-clock also moves the MAC clock (`0x24[21:20]`) and the
+  µs ticks (`0x55c`/`0x638`), and a **full set leaving narrowband must put
+  them back** (`set_mac_bw_txsc` does, as halmac's `cfg_bw` does at every
+  switch). Until 2026-10-30 it didn't: on one ground station's two 8812EUs,
+  path-B RSSI and per-path SNR read ~0 for the rest of a flight from the
+  moment it returned from a 10 MHz trip, while frames kept decoding. That
+  the clock caused the reading is inferred (it was the only state the trip
+  left behind, per `tests/jaguar3_batched_chset_selftest.cpp`), not yet
+  bench-confirmed. The TX-shaping registers the recipe writes
+  (`0xa74`/`0x80c`/`0x81c`/`0x8a0`) hold the BB table's own values, so a
+  full set needs no restore there — but `fast_set_bandwidth(20)` writes the
+  vendor's band-dependent shaping instead, so the two ways out of
+  narrowband leave different TX shaping (unmeasured on air).
 - halrf calibration: DACK/IQK/TXGAPK/thermal tracking.
 - **40 MHz inject needs two things.** (1) 8822C only: DISDATAFB=1 on
   40/80 MHz inject descriptors (`fill_data_tx_desc_8822c`, so those frames
