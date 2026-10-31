@@ -285,6 +285,55 @@ int main() {
     }
   }
 
+  /* tuning.spur_ext_8822e at 80 MHz: 149@80 (centre 155) and 165@80 (171)
+   * also weight CSI-mask entry 40 (tone 80, the upper spike 25 MHz above
+   * centre); the next spur set cleans it; batched writes what plain does.
+   * Off: entry 40 is never written. Read back through the table port's
+   * last-written address and weight nibble (0x1d94[23:16] / [3:0]). */
+  {
+    using RM = jaguar3::RadioManagementJaguar3;
+    for (bool on : {true, false}) {
+      devourer::DeviceConfig ecfg = cfg;
+      ecfg.tuning.spur_ext_8822e = on;
+      for (uint8_t ch : {uint8_t(149), uint8_t(165)}) {
+        auto a = std::make_shared<FakeChip>();
+        auto b = std::make_shared<FakeChip>();
+        RM ra(RtlAdapter(a, logger, ecfg), logger, jaguar3::ChipVariant::C8822E, ecfg);
+        RM rb(RtlAdapter(b, logger, ecfg), logger, jaguar3::ChipVariant::C8822E, ecfg);
+        ra.set_channel_bwmode(132, 0, CHANNEL_WIDTH_80);
+        rb.set_channel_bwmode(132, 0, CHANNEL_WIDTH_80);
+        const size_t mark = a->writes.size();
+        ra.set_channel_bwmode(ch, 0, CHANNEL_WIDTH_80);
+        CHECK(rb.set_channel_bwmode_batched(ch, 0, CHANNEL_WIDTH_80));
+        CHECK(a->writes == b->writes && a->bytes == b->bytes);
+        /* Did the set address table entry 40 (0x1d94[23:16] = 40, i.e. byte
+         * 0x1d96 = 40) after its last clean? */
+        bool addressed40 = false;
+        for (size_t i = mark; i < a->writes.size(); ++i) {
+          const auto &w = a->writes[i];
+          const uint16_t addr = std::get<0>(w);
+          const int width = std::get<1>(w);
+          const uint32_t v = std::get<2>(w);
+          if (addr == 0x1d94 && width == 4 && ((v >> 16) & 0xff) == 40) addressed40 = true;
+          if (addr == 0x1d96 && width == 1 && (v & 0xff) == 40) addressed40 = true;
+        }
+        CHECK(addressed40 == on);
+        /* Entry 40's weight as the set leaves it: the final 0x1d94 byte 0. */
+        if (on) CHECK((a->get(0x1d96, 1) & 0xff) == 40 && (a->get(0x1d94, 1) & 0xf) == 0xa);
+        /* On to a 40 MHz spur pair: its clean zeroes entry 40 again. */
+        const size_t mark2 = a->writes.size();
+        ra.set_channel_bwmode(149, 1, CHANNEL_WIDTH_40);
+        bool cleaned40 = false;
+        for (size_t i = mark2; i < a->writes.size(); ++i) {
+          const auto &w = a->writes[i];
+          if (std::get<0>(w) == 0x1d94 && ((std::get<2>(w) >> 16) & 0xff) == 40) cleaned40 = true;
+          if (std::get<0>(w) == 0x1d96 && (std::get<2>(w) & 0xff) == 40) cleaned40 = true;
+        }
+        CHECK(cleaned40 == on);
+      }
+    }
+  }
+
   /* A trip through narrowband must not outlive itself: a full set from 5/10
    * MHz back to 20/40/80 leaves the chip as a set that never left, except for
    * the 8822E TX-shaping registers the narrowband recipe writes (0x80c,

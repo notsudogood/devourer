@@ -106,7 +106,12 @@ was a real failure on the bench:
   values -- not vendor rows. On one 8812EU drone, 153/161/169@20 and
   173@40 stalled the TX path (USB hand-offs 40-170 ms, queue drops) even
   with the vendor notch on the first three, so a notch does not by itself
-  cure the stall; 173 with the extension is untested.
+  cure the stall; 173 with the extension is untested. At 80 MHz each upper
+  block holds two spikes and the vendor's 155@80 / 171@80 rows weight only
+  the lower (tone 208: 5760 / 5840 MHz); with the extension the upper one
+  (tone 80: 5800 / 5880 MHz) gets a CSI-mask weight too, and the mask
+  clean covers that entry (40) so it cannot outlive the block. Untested on
+  air; one 8812EU lost frames at 149@80 without it.
 - **CCK TX shaping filter** (2.4 GHz, per channel; ch14 special set) + per-band
   TX backoff/scaling.
 - 2.4 GHz RX needs the RF-write force-update brackets (`0x1830[29]`/

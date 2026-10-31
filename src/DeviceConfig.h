@@ -400,7 +400,11 @@ struct DeviceConfig {
      * the vendor's 169@20 / 167@40 rows. Not a vendor setting. On one
      * 8812EU drone, 173 at 40 MHz stalled the TX path without it (USB
      * hand-offs 40-170 ms); not yet tested with it. Default OFF; "1" = on.
-     * 80 MHz is not extended (the 165-177 block holds two spikes). */
+     * At 80 MHz each upper block holds two spikes and the vendor rows
+     * (155@80, 171@80) notch only the lower one (5760 / 5840 MHz); on, the
+     * upper one (5800 / 5880, tone 80 of 256) gets a CSI-mask weight too,
+     * the manual NBI notch staying on the vendor's tone, and the mask clean
+     * covers that tone. Unmeasured on air at 80 MHz as well. */
     bool spur_ext_8822e = false;
     /* env: DEVOURER_KFR_OFLD — Kestrel FastRetune firmware IO-offload (mac_ax
      * fwofld.c): batch the whole same-sub-band hop (RF18/0xcf channel set + BB

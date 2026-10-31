@@ -357,12 +357,22 @@ void RadioManagementJaguar3::clean_csi_mask_8822e() {
     _device.phy_set_bb_reg(0x1d94, 0x00ff0000, t);
     _device.phy_set_bb_reg(0x1d94, 0x000000ff, 0x0);
   }
+  /* tuning.spur_ext_8822e's 80 MHz tone 80 (table entry 40): cleaned with
+   * the vendor's eight, or it would outlive 155@80 / 171@80 -- at 40 MHz
+   * entry 40 is a real subcarrier (-15 MHz) that the next spur pair's mask
+   * would carry. Ext off: the vendor's sequence, byte for byte. */
+  if (_cfg.tuning.spur_ext_8822e) {
+    _device.phy_set_bb_reg(0x1d94, 0x00ff0000, 40);
+    _device.phy_set_bb_reg(0x1d94, 0x000000ff, 0x0);
+  }
   _device.phy_set_bb_reg(0x1ee8, 0x3, 0x0);
 }
 
 /* Central-channel/BW combos phydm_spur_eliminate_8822e special-cases —
  * shared by the spur apply below and the fast_retune decline gate. With
- * tuning.spur_ext_8822e, also the 5880 MHz rows (177@20, 175@40). */
+ * tuning.spur_ext_8822e, also the 5880 MHz rows (177@20, 175@40); its 80 MHz
+ * addition (the second spike of 155@80 and 171@80) rides combos the vendor
+ * table already has. */
 bool RadioManagementJaguar3::is_spur_combo_8822e(uint8_t ch,
                                                  ChannelWidth_t bw) const {
   const bool ext = _cfg.tuning.spur_ext_8822e;
@@ -433,6 +443,15 @@ void RadioManagementJaguar3::spur_eliminate_8822e(uint8_t ch,
     set_nbi_wa_para_8822e(c.nbi, bw);
     for (uint8_t i = 0; i < c.csi_n; ++i)
       set_csi_mask_8822e(c.csi_tones[i], c.weight);
+    /* tuning.spur_ext_8822e at 80 MHz (not a vendor row): each upper block
+     * holds TWO spikes and the vendor notches only the lower one (tone 208,
+     * -15 MHz: 5760 in 155@80, 5840 in 171@80). The upper one sits 25 MHz
+     * above centre, tone 80 of 256 (5800 / 5880 MHz); weight it in the CSI
+     * mask too, with the vendor's single-tone value. There is one manual
+     * NBI notch, and it stays on the vendor's tone. Unmeasured on air: the
+     * 80 MHz blocks above 144 lost frames on an 8812EU without it. */
+    if (ext && bw == CHANNEL_WIDTH_80 && (ch == 155 || ch == 171))
+      set_csi_mask_8822e(80, c.weight);
     _device.phy_set_bb_reg(0xc24, 0xffff, c.pkt_det);
     return;
   }
