@@ -48,7 +48,12 @@ narrowband dividers, RF18 encoding), strategy interfaces `Jaguar3Calibration`
   second needs it), so a passing unit says nothing about the next; the
   default is the lowest value measured to clear all four, and its
   RX-sensitivity cost (~21 dB over the DFS floor) is estimated, not measured.
-  80 MHz and 2.4 GHz HT40 are open. Mechanism, per-unit table and the dead
+  `IRtlRadio::SetWideTxIgiFloor` moves the floor live (post-bring-up, under
+  `_reg_mu`, writes IGI at once when armed and tuned wide) for a caller that
+  learns each unit's edge — mabur's d18 drone starts at 0 and steps
+  0x24/0x2c/0x35 on a seen stall. Whether a raise releases a frame the MAC
+  is *already* holding is not measured; the bench only ever pinned IGI
+  before TX. 80 MHz and 2.4 GHz HT40 are open. Mechanism, per-unit table and the dead
   ends: `docs/experiments/8822c-ht40-tx-stall.md`.
 - **Firmware channel switch** (H2C 0x1D via `fastretune_fw`, both dies): the
   fw-switch H2C must ride `HalJaguar3::send_h2c_raw`'s HMEBOX box counter —

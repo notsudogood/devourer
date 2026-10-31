@@ -256,6 +256,26 @@ public:
     return false;
   }
 
+  /* The wide-TX IGI floor at runtime (DeviceConfig::Tuning::
+   * wide_tx_igi_floor is only its construction-time value; 0 = off). For a
+   * caller that learns a unit's own edge -- the 40 MHz stall's threshold is
+   * per unit (docs/experiments/8822c-ht40-tx-stall.md) -- and raises the
+   * floor when it sees a stall, instead of flying every unit at the 0x35
+   * that cleared the worst one measured. The floor keeps its contract: it
+   * applies only once the session has sent a >= 40 MHz frame and only while
+   * tuned 40/80 MHz; a new value takes effect at once for the current tune
+   * (IGI raised to it, or clamped back into the normal window when lowered
+   * or cleared) and sticks across retunes. Post-bring-up only, false before
+   * it and on every generation but Jaguar3. Thread-safe against the send
+   * path. Whether raising it un-wedges a frame the MAC is already holding
+   * is not measured. */
+  virtual bool SetWideTxIgiFloor(uint8_t floor) {
+    (void)floor;
+    return false;
+  }
+  /* The floor in force now (0 = off), -1 where not ported. */
+  virtual int GetWideTxIgiFloor() { return -1; }
+
 protected:
   using Read32 = std::function<uint32_t(uint16_t)>;
   using SetBb = std::function<void(uint16_t, uint32_t, uint32_t)>;

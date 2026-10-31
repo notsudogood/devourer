@@ -57,6 +57,7 @@ RtlJaguar3Device::RtlJaguar3Device(RtlAdapter device, Logger_t logger,
    * callers serialize on _reg_mu). */
   _radioManagement.set_h2c_sender(
       [this](uint32_t msg, uint32_t ext) { _hal.send_h2c_raw(msg, ext); });
+  _wide_floor.store(_cfg.tuning.wide_tx_igi_floor, std::memory_order_relaxed);
   _logger->info("RtlJaguar3Device constructed ({})",
                 variant == jaguar3::ChipVariant::C8822E ? "8822E/EU" : "8822C/CU");
 }
@@ -1636,6 +1637,18 @@ bool RtlJaguar3Device::GetCcaGates(bool &primary_disabled, bool &edcca_disabled)
   return true;
 }
 
+bool RtlJaguar3Device::SetWideTxIgiFloor(uint8_t floor) {
+  std::lock_guard<std::mutex> lk(_reg_mu);
+  if (!_brought_up)
+    return false;
+  _wide_floor.store(floor, std::memory_order_relaxed);
+  apply_igi_floor_locked(_channel.Channel, _channel.ChannelWidth);
+  _logger->info("Jaguar3: wide-TX IGI floor 0x{:02x} ({}armed, tuned {})", floor,
+                _wide_tx_seen.load(std::memory_order_relaxed) ? "" : "not yet ",
+                static_cast<int>(_channel.ChannelWidth));
+  return true;
+}
+
 bool RtlJaguar3Device::SetCcaGates(bool primary_disabled, bool edcca_disabled) {
   std::lock_guard<std::mutex> lk(_reg_mu);
   /* Post-bring-up only, and it says so rather than recording a request it
@@ -1863,7 +1876,7 @@ void RtlJaguar3Device::apply_igi_floor_locked(uint8_t channel,
                                               bool wide_tx_seen) {
   const bool wide = width == CHANNEL_WIDTH_40 || width == CHANNEL_WIDTH_80;
   _phydm.set_igi_floor(
-      (wide && wide_tx_seen) ? _cfg.tuning.wide_tx_igi_floor : 0, channel);
+      (wide && wide_tx_seen) ? _wide_floor.load(std::memory_order_relaxed) : 0, channel);
 }
 
 /* Re-program TXAGC from the current knob state (see header). Both TXAGC
@@ -2676,7 +2689,7 @@ size_t RtlJaguar3Device::build_tx_block(const uint8_t *packet, size_t length,
     pwr_type = txpkt_type_for_idx(txpkt_idx_for_qdb(radiotap_pkt_pwr_db * 4));
   /* Either die, the session's first >= 40 MHz frame: record it
    * (_wide_tx_seen) and apply the IGI floor (DeviceConfig::Tuning::
-   * wide_tx_igi_floor; 0 = off, no arm) for the CURRENT tune before the
+   * wide_tx_igi_floor, or SetWideTxIgiFloor's value; 0 writes nothing) for the CURRENT tune before the
    * frame is queued — on a quiet channel the MAC would otherwise hold it
    * forever. Whether the floor is on follows the tuned width, which is read
    * under _reg_mu here and by every retune (apply_igi_floor_locked), so a
@@ -2687,8 +2700,10 @@ size_t RtlJaguar3Device::build_tx_block(const uint8_t *packet, size_t length,
   const bool wide_frame =
       bwidth == CHANNEL_WIDTH_40 || bwidth == CHANNEL_WIDTH_80;
   const bool c_die = _variant == jaguar3::ChipVariant::C8822C;
-  if (wide_frame && _cfg.tuning.wide_tx_igi_floor != 0 &&
-      !_wide_tx_seen.load(std::memory_order_acquire)) {
+  /* Armed by the first wide frame whatever the floor is now, so a floor
+   * SetWideTxIgiFloor raises later (a learned per-unit edge starting at 0)
+   * applies at once; with the floor at 0 the arm writes nothing. */
+  if (wide_frame && !_wide_tx_seen.load(std::memory_order_acquire)) {
     std::lock_guard<std::mutex> lk(_reg_mu);
     if (!_wide_tx_seen.load(std::memory_order_relaxed)) {
       apply_igi_floor_locked(_channel.Channel, _channel.ChannelWidth,

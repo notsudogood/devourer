@@ -460,7 +460,11 @@ struct DeviceConfig {
      * measured: 0x35 is 21 steps over the DFS floor 0x20 and 19-23 over the
      * 0x1e..0x22 non-DFS window. Lower it to a unit's own measured edge to
      * buy that back. 80 MHz carries the same floor, only partially
-     * validated. docs/experiments/8822c-ht40-tx-stall.md. */
+     * validated. This is the session's starting value: the arm happens at
+     * the first wide frame whatever it is (0 included, which writes
+     * nothing), and IRtlRadio::SetWideTxIgiFloor changes it live for a
+     * caller that learns a unit's edge in the field.
+     * docs/experiments/8822c-ht40-tx-stall.md. */
     uint8_t wide_tx_igi_floor = 0x35;
     /* env: DEVOURER_TXPKT_STEP_QDB — Jaguar3 per-packet power-bank step size
      * in quarter-dB: the dB weight of one 0x1e70 offset-index step

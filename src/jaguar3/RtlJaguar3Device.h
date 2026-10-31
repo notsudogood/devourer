@@ -246,6 +246,8 @@ public:
   void SetCcaMode(bool disabled) override;
   /* The two gates independently — see IRtlRadio. */
   bool SetCcaGates(bool primary_disabled, bool edcca_disabled) override;
+  bool SetWideTxIgiFloor(uint8_t floor) override;
+  int GetWideTxIgiFloor() override { return _wide_floor.load(std::memory_order_relaxed); }
   bool GetCcaGates(bool &primary_disabled, bool &edcca_disabled) override;
 
   /* Adapter-health probes (see src/AdapterHealth.h). EFUSE probe is 8822C
@@ -359,6 +361,10 @@ private:
                            _wide_tx_seen.load(std::memory_order_relaxed));
   }
   std::atomic<bool> _wide_tx_seen{false};
+  /* The floor value in force (tuning.wide_tx_igi_floor at construction,
+   * SetWideTxIgiFloor after); 0 = off. Written under _reg_mu, read by the
+   * retune paths under it. */
+  std::atomic<uint8_t> _wide_floor{0};
   SelectedChannel _channel{};
   /* Mirrors _channel.ChannelWidth as a devourer bw code (0/1/2 = 20/40/80 MHz)
    * so the RX completion handler can read the currently-tuned width without
